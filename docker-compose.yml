@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: local_rss_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_password123
+      POSTGRES_DB: rss_intelligence
+    ports:
+      - "5432:5432"
+    volumes:
+      - local_pg_data:/var/lib/postgresql/data
+
+volumes:
+  local_pg_data:
