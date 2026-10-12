@@ -1,10 +1,19 @@
+import os
 import time
 import json
+import logging
 from db import get_db
 from ai import ai_client, FAST_MODEL
-from schemas import ArticleEnrichmentOut
+from schemas import ArticleEnrichmentOut, ArticleTldrOut
+from classifier import LayaClassifier
+from embedder import get_embedder
 
-SYSTEM_PROMPT = """
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("worker")
+
+ENRICHMENT_ENGINE = os.getenv("ENRICHMENT_ENGINE", "hybrid").lower()
+
+SYSTEM_PROMPT_FULL = """
 You are an RSS news tagging and summarization engine. 
 Analyze the input text and extract metadata.
 You must respond with valid JSON matching this schema:
@@ -15,7 +24,145 @@ You must respond with valid JSON matching this schema:
 }
 """
 
-def process_batch():
+SYSTEM_PROMPT_TLDR = """
+You are an RSS news summarization engine. 
+The article topic has already been classified. Provide a strictly grounded 2-sentence empirical summary of the news.
+You must respond with valid JSON matching this schema:
+{
+  "tldr": "A 2-sentence empirical summary of the news."
+}
+"""
+
+# Lazy-loaded classifier instance
+_classifier = None
+
+def get_classifier():
+    global _classifier
+    if _classifier is None and ENRICHMENT_ENGINE == "hybrid":
+        _classifier = LayaClassifier()
+    return _classifier
+
+def init_db_schema():
+    """Ensure optional observability and vector columns exist in the articles table."""
+    try:
+        with get_db() as cur:
+            cur.execute("""
+                ALTER TABLE articles 
+                ADD COLUMN IF NOT EXISTS confidence_score FLOAT,
+                ADD COLUMN IF NOT EXISTS on_topic_score FLOAT,
+                ADD COLUMN IF NOT EXISTS macro_tags TEXT[],
+                ADD COLUMN IF NOT EXISTS embedding vector(384);
+                CREATE INDEX IF NOT EXISTS idx_articles_macro_tags ON articles USING GIN (macro_tags);
+                CREATE INDEX IF NOT EXISTS idx_articles_embedding ON articles USING hnsw (embedding vector_cosine_ops);
+            """)
+        logger.info("Database schema columns verified (confidence_score, on_topic_score, macro_tags, embedding).")
+    except Exception as e:
+        logger.warning("Could not verify DB columns: %s", e)
+
+def generate_tldr_only(title: str, text: str, macro_tag: str, micro_tags: list) -> str:
+    """Fast targeted LLM call that only generates the 2-sentence TL;DR summary."""
+    truncated = text[:3500]
+    prompt = f"Category: {macro_tag} ({', '.join(micro_tags)})\nTitle: {title}\n\nContent:\n{truncated}"
+    
+    try:
+        resp = ai_client.chat.completions.create(
+            model=FAST_MODEL,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_TLDR},
+                {"role": "user", "content": prompt}
+            ],
+            timeout=20.0
+        )
+    except Exception as fe:
+        if "json_schema" in str(fe):
+            resp = ai_client.chat.completions.create(
+                model=FAST_MODEL,
+                temperature=0.0,
+                response_format={
+                    "type": "json_schema", 
+                    "json_schema": {"name": "tldr_only", "schema": ArticleTldrOut.model_json_schema()}
+                },
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_TLDR},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=20.0
+            )
+        else:
+            raise fe
+
+    data = json.loads(resp.choices[0].message.content)
+    return data.get("tldr", "").strip()
+
+def generate_full_enrichment(title: str, text: str, hint: str = "") -> tuple[str, list, str]:
+    """Fallback LLM call that extracts macro_tag, micro_tags, and tldr in a single prompt."""
+    truncated = text[:3500]
+    prompt = f"{hint}Title: {title}\n\nContent:\n{truncated}".strip()
+    
+    try:
+        resp = ai_client.chat.completions.create(
+            model=FAST_MODEL,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_FULL},
+                {"role": "user", "content": prompt}
+            ],
+            timeout=25.0
+        )
+    except Exception as fe:
+        if "json_schema" in str(fe):
+            resp = ai_client.chat.completions.create(
+                model=FAST_MODEL,
+                temperature=0.0,
+                response_format={
+                    "type": "json_schema", 
+                    "json_schema": {"name": "enrichment", "schema": ArticleEnrichmentOut.model_json_schema()}
+                },
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_FULL},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=25.0
+            )
+        else:
+            raise fe
+
+    raw = json.loads(resp.choices[0].message.content)
+    parsed = ArticleEnrichmentOut(**raw)
+    from taxonomy import clean_micro_tags
+    clean_micro = clean_micro_tags(parsed.micro_tags, max_tags=6)
+    return parsed.macro_tag, clean_micro, parsed.tldr
+
+def save_article_enrichment(art_id: str, macro: str, macro_tags: list, micro: list, tldr: str, title: str = "", conf: float = None, on_topic: float = None):
+    """Saves enriched article to DB, generating and storing 384-d dense vector embeddings."""
+    embedding = None
+    if title or tldr:
+        try:
+            embedder = get_embedder()
+            embedding = embedder.embed_text(f"{title}. {tldr}")
+        except Exception as ee:
+            logger.warning("Could not generate embedding for article %s: %s", art_id, ee)
+
+    with get_db() as cur:
+        try:
+            cur.execute("""
+                UPDATE articles 
+                SET macro_tag = %s, macro_tags = %s, micro_tags = %s, tldr = %s, 
+                    confidence_score = %s, on_topic_score = %s, embedding = %s, is_processed = TRUE 
+                WHERE id = %s;
+            """, (macro, macro_tags, micro, tldr, conf, on_topic, embedding, art_id))
+        except Exception:
+            cur.execute("""
+                UPDATE articles 
+                SET macro_tag = %s, micro_tags = %s, tldr = %s, embedding = %s, is_processed = TRUE 
+                WHERE id = %s;
+            """, (macro, micro, tldr, embedding, art_id))
+
+
+def process_batch() -> bool:
     with get_db() as cur:
         cur.execute("""
             SELECT id, title, clean_text 
@@ -29,55 +176,87 @@ def process_batch():
     if not batch:
         return False
 
-    for art_id, title, text in batch:
-        truncated_text = text[:3500]
-        prompt = f"Title: {title}\n\nContent:\n{truncated_text}"
-        
-        try:
-            try:
-                resp = ai_client.chat.completions.create(
-                    model=FAST_MODEL,
-                    temperature=0.0,
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt}
-                    ],
-                    timeout=25.0
-                )
-            except Exception as fe:
-                if "json_schema" in str(fe):
-                    resp = ai_client.chat.completions.create(
-                        model=FAST_MODEL,
-                        temperature=0.0,
-                        response_format={"type": "json_schema", "json_schema": {"name": "enrichment", "schema": ArticleEnrichmentOut.model_json_schema()}},
-                        messages=[
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": prompt}
-                        ],
-                        timeout=25.0
-                    )
-                else:
-                    raise fe
-            raw = json.loads(resp.choices[0].message.content)
-            parsed = ArticleEnrichmentOut(**raw)
-            clean_micro = [t.lower().strip() for t in parsed.micro_tags]
+    classifier = get_classifier()
+    has_classifier = classifier is not None and classifier.is_available()
 
-            with get_db() as cur:
-                cur.execute("""
-                    UPDATE articles 
-                    SET macro_tag = %s, micro_tags = %s, tldr = %s, is_processed = TRUE 
-                    WHERE id = %s;
-                """, (parsed.macro_tag, clean_micro, parsed.tldr, art_id))
-            print(f"[Worker Enriched] {title[:30]} -> {parsed.macro_tag} / {clean_micro}")
+    for art_id, title, text in batch:
+        try:
+            t0 = time.perf_counter()
+            triage = None
+
+            # --- STAGE 1: Fast Sub-100ms SLM Triage (if enabled) ---
+            if has_classifier:
+                triage = classifier.classify(title, text)
+
+            if triage is not None:
+                # 1A. Noise / Spam Filter Gate
+                if triage.is_off_topic:
+                    save_article_enrichment(
+                        art_id, 
+                        macro="Off-Topic", 
+                        macro_tags=["Off-Topic"],
+                        micro=["off_topic"], 
+                        tldr="Filtered out: Article does not match monitored news topics.",
+                        title=title,
+                        conf=triage.confidence,
+                        on_topic=triage.on_topic_score
+                    )
+                    logger.info(
+                        "[Worker Filtered] %s -> Off-Topic (Score: %.2f in %.0fms)", 
+                        title[:35], triage.on_topic_score, triage.latency_ms
+                    )
+                    continue
+
+                # 1B. Confident Triage -> Targeted Fast TL;DR Only
+                if not triage.needs_escalation:
+                    tldr = generate_tldr_only(title, text, triage.macro_tag, triage.micro_tags)
+                    save_article_enrichment(
+                        art_id,
+                        macro=triage.macro_tag,
+                        macro_tags=triage.macro_tags,
+                        micro=triage.micro_tags,
+                        tldr=tldr,
+                        title=title,
+                        conf=triage.confidence,
+                        on_topic=triage.on_topic_score
+                    )
+                    total_ms = (time.perf_counter() - t0) * 1000
+                    logger.info(
+                        "[Worker Hybrid] %s -> %s / %s (Laya: %.0fms | Conf: %.2f | Total: %.0fms)",
+                        title[:30], triage.macro_tags, triage.micro_tags, triage.latency_ms, triage.confidence, total_ms
+                    )
+                    continue
+
+                # 1C. Low-Confidence Edge Case -> Escalate to Generative LLM
+                hint = f"[Triage Suggestion: Likely {triage.macro_tags} (conf: {triage.confidence:.2f})]\n"
+                logger.info("[Worker Escalation] %s (Laya conf: %.2f < threshold)", title[:30], triage.confidence)
+                macro, micro, tldr = generate_full_enrichment(title, text, hint=hint)
+                save_article_enrichment(
+                    art_id, macro=macro, macro_tags=[macro], micro=micro, tldr=tldr,
+                    title=title, conf=triage.confidence, on_topic=triage.on_topic_score
+                )
+                logger.info("[Worker Escalated Enriched] %s -> %s / %s", title[:30], macro, micro)
+                continue
+
+            # --- STAGE 2: Fallback Standard LLM Enrichment ---
+            macro, micro, tldr = generate_full_enrichment(title, text)
+            save_article_enrichment(art_id, macro=macro, macro_tags=[macro], micro=micro, tldr=tldr, title=title)
+            logger.info("[Worker Legacy Enriched] %s -> %s / %s", title[:30], macro, micro)
+
+
         except Exception as e:
-            print(f"[Worker Error] {art_id}: {e}")
+            logger.error("[Worker Error] %s: %s", art_id, e)
             with get_db() as cur:
                 cur.execute("UPDATE articles SET is_processed = TRUE WHERE id = %s;", (art_id,))
+    
     return True
 
 if __name__ == "__main__":
-    print("Worker running. Polling for unprocessed articles...")
+    init_db_schema()
+    classifier = get_classifier()
+    mode_str = "HYBRID (Laya SLM Triage + Generative TLDR)" if (classifier and classifier.is_available()) else "LEGACY LLM-ONLY"
+    logger.info("Worker started in %s mode. Polling for unprocessed articles...", mode_str)
+    
     while True:
         had_work = process_batch()
         if not had_work:

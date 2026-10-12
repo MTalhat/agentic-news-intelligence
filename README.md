@@ -8,7 +8,7 @@ A high-performance news aggregation, asynchronous AI enrichment, and multi-agent
 
 ### 1. Ingestion & Asynchronous Enrichment Pipeline
 - **Fast Deduplication Ingest**: `/api/internal/ingest` normalizes incoming articles and deduplicates using SHA-256 URL hashes.
-- **Background Worker Engine** (`worker.py`): Decoupled polling service that classifies articles into macro categories (`Tech`, `AI`, `Hardware`, `Automotive`, `Gaming`, `Finance`, `Science`), generates specific micro-tags, and produces 2-sentence empirical summaries (TL;DR).
+- **Hybrid Triage Worker Engine** (`worker.py`): Two-stage asynchronous pipeline combining a sub-100ms decision SLM (**Laya**) for deterministic taxonomy classification and relevance gating with generative LLMs (**Nemotron / Llama-3.1 / Nebius**) strictly for high-quality 2-sentence empirical summaries (TL;DR). Features calibrated confidence routing and automatic escalation for edge cases.
 
 ### 2. Multi-Tier AI Agent Architecture
 - **Tier 1 — Intent-Driven Search** (`/api/search`): Analyzes natural language search queries to infer category and tag intents, queried against PostgreSQL GIN indexes with full-text search fallback.

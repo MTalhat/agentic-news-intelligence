@@ -15,6 +15,9 @@ class ArticleEnrichmentOut(BaseModel):
     micro_tags: List[str] = Field(..., description="3 to 6 lowercase specific tags")
     tldr: str = Field(..., description="A 2-sentence summary")
 
+class ArticleTldrOut(BaseModel):
+    tldr: str = Field(..., description="A 2-sentence empirical summary of the news.")
+
 class QueryIntentOut(BaseModel):
     macro_tag: Optional[str] = None
     micro_tags: List[str] = Field(default_factory=list)

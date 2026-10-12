@@ -20,11 +20,22 @@ CREATE TABLE IF NOT EXISTS articles (
     published_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     clean_text TEXT NOT NULL,
     macro_tag VARCHAR(50),
+    macro_tags TEXT[],
     micro_tags TEXT[],
     tldr TEXT,
+    confidence_score FLOAT,
+    on_topic_score FLOAT,
+    embedding vector(384),
     is_processed BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Backward-compatible migrations for existing databases
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS confidence_score FLOAT;
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS on_topic_score FLOAT;
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS macro_tags TEXT[];
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding vector(384);
+
 
 -- 3. Social Paragraph Annotations
 CREATE TABLE IF NOT EXISTS article_comments (
@@ -40,8 +51,10 @@ CREATE TABLE IF NOT EXISTS article_comments (
 CREATE INDEX IF NOT EXISTS idx_articles_url_hash ON articles (url_hash);
 CREATE INDEX IF NOT EXISTS idx_articles_is_processed ON articles (is_processed);
 CREATE INDEX IF NOT EXISTS idx_articles_macro_tag ON articles (macro_tag);
+CREATE INDEX IF NOT EXISTS idx_articles_macro_tags ON articles USING GIN (macro_tags);
 CREATE INDEX IF NOT EXISTS idx_articles_micro_tags ON articles USING GIN (micro_tags);
 CREATE INDEX IF NOT EXISTS idx_articles_fts ON articles USING GIN (to_tsvector('english', title || ' ' || clean_text));
+CREATE INDEX IF NOT EXISTS idx_articles_embedding ON articles USING hnsw (embedding vector_cosine_ops);
 
 -- Seed default test user
 INSERT INTO users (id, username, avatar_url)
