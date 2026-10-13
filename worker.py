@@ -59,13 +59,46 @@ def init_db_schema():
     except Exception as e:
         logger.warning("Could not verify DB columns: %s", e)
 
+def clean_and_parse_json(content: str) -> dict:
+    """Robust JSON extraction that strips markdown code fences and whitespace."""
+    text = (content or "").strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    
+    # Locate outer brackets
+    s = text.find("{")
+    e = text.rfind("}")
+    if s != -1 and e != -1 and e > s:
+        text = text[s:e+1]
+    return json.loads(text)
+
 def generate_tldr_only(title: str, text: str, macro_tag: str, micro_tags: list) -> str:
     """Fast targeted LLM call that only generates the 2-sentence TL;DR summary."""
     truncated = text[:3500]
     prompt = f"Category: {macro_tag} ({', '.join(micro_tags)})\nTitle: {title}\n\nContent:\n{truncated}"
     
+    # 1. Fast direct prompt (5-8x faster on local LM Studio without GBNF grammar lag)
     try:
-        # Try json_schema first (strictly required by local LM Studio)
+        resp = ai_client.chat.completions.create(
+            model=FAST_MODEL,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_TLDR},
+                {"role": "user", "content": prompt}
+            ],
+            timeout=50.0
+        )
+        data = clean_and_parse_json(resp.choices[0].message.content)
+        tldr = data.get("tldr", "").strip()
+        if tldr:
+            return tldr
+    except Exception as e:
+        logger.warning("[TLDR Fast Call Retry] %s. Falling back to structured schema...", e)
+
+    # 2. Structured json_schema fallback
+    try:
         resp = ai_client.chat.completions.create(
             model=FAST_MODEL,
             temperature=0.0,
@@ -77,23 +110,15 @@ def generate_tldr_only(title: str, text: str, macro_tag: str, micro_tags: list) 
                 {"role": "system", "content": SYSTEM_PROMPT_TLDR},
                 {"role": "user", "content": prompt}
             ],
-            timeout=35.0
+            timeout=50.0
         )
-    except Exception:
-        # Fallback for cloud providers (Nebius/OpenAI) that support json_object
-        resp = ai_client.chat.completions.create(
-            model=FAST_MODEL,
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT_TLDR},
-                {"role": "user", "content": prompt}
-            ],
-            timeout=35.0
-        )
-
-    data = json.loads(resp.choices[0].message.content)
-    return data.get("tldr", "").strip()
+        data = clean_and_parse_json(resp.choices[0].message.content)
+        return data.get("tldr", "").strip()
+    except Exception as fe:
+        logger.error("[TLDR Error] Failed to generate summary: %s", fe)
+        # Safe fallback summary from content rather than dropping the article
+        first_sentence = text.strip().split(".")[0] if text else title
+        return f"{title}. {first_sentence}."
 
 def generate_full_enrichment(title: str, text: str, hint: str = "") -> tuple[str, list, str]:
     """Fallback LLM call that extracts macro_tag, micro_tags, and tldr in a single prompt."""
@@ -101,6 +126,17 @@ def generate_full_enrichment(title: str, text: str, hint: str = "") -> tuple[str
     prompt = f"{hint}Title: {title}\n\nContent:\n{truncated}".strip()
     
     try:
+        resp = ai_client.chat.completions.create(
+            model=FAST_MODEL,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_FULL},
+                {"role": "user", "content": prompt}
+            ],
+            timeout=50.0
+        )
+        raw = clean_and_parse_json(resp.choices[0].message.content)
+    except Exception:
         resp = ai_client.chat.completions.create(
             model=FAST_MODEL,
             temperature=0.0,
@@ -112,21 +148,10 @@ def generate_full_enrichment(title: str, text: str, hint: str = "") -> tuple[str
                 {"role": "system", "content": SYSTEM_PROMPT_FULL},
                 {"role": "user", "content": prompt}
             ],
-            timeout=35.0
+            timeout=50.0
         )
-    except Exception:
-        resp = ai_client.chat.completions.create(
-            model=FAST_MODEL,
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT_FULL},
-                {"role": "user", "content": prompt}
-            ],
-            timeout=35.0
-        )
+        raw = clean_and_parse_json(resp.choices[0].message.content)
 
-    raw = json.loads(resp.choices[0].message.content)
     parsed = ArticleEnrichmentOut(**raw)
     from taxonomy import clean_micro_tags
     clean_micro = clean_micro_tags(parsed.micro_tags, max_tags=6)
