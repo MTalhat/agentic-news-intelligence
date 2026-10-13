@@ -26,6 +26,7 @@ rss-backend/
 ├── classifier.py            # Local Decision SLM (convaiinnovations/laya)
 ├── embedder.py              # Dense Vector Embedding Engine (sentence-transformers/all-MiniLM-L6-v2)
 ├── taxonomy.py              # Domain Taxonomy, Tagging Criteria & Keyword Normalization
+├── content_cleaner.py       # Generalized 4-Pass Markdown Article Sanitizer & Boilerplate Pruner
 ├── tavily_service.py        # Tavily Live Search, Grounded Fact-Checking & TTL Cache
 ├── ingest_tavily.py         # Autonomous Tavily Ingestion Daemon Across 7 Macro Taxonomy Topics
 ├── url_utils.py             # Canonical URL Normalization & Safe Domain Extraction
@@ -35,11 +36,13 @@ rss-backend/
 ├── schema.sql               # PostgreSQL DDL, Extensions & Indexes (pgvector, HNSW, GIN)
 ├── docker-compose.yml       # Local PostgreSQL 16 + pgvector Container Config
 ├── migrate_embeddings.py    # Database Migration Script: Embeds Existing Articles
+├── clean_articles_db.py     # Database Maintenance Script: Batch Cleans Markdown Boilerplate
 ├── reindex_articles.py      # Maintenance Script: Batch Re-enriches & Re-classifies Articles
 ├── requirements.txt         # Core Python Runtime Dependencies
 ├── .env / .env.example      # Environment Configurations, Secrets & Routing Thresholds
 └── tests/                   # Consolidated Test & Benchmark Suite
     ├── comprehensive_test_evaluation.py # Master 9-Part End-to-End Evaluation Suite
+    ├── test_content_cleaner.py         # Markdown Sanitizer 4-Pass Unit Test Suite
     ├── test_tavily_integration.py      # Tavily Integration, URL Canonicalization & SSE Tests
     ├── fixtures/tavily_verify_mock.json # Deterministic Demo Mode Verification Fixtures
     ├── test_search_speed.py            # Hybrid Vector Search Latency Benchmarks
@@ -75,11 +78,21 @@ rss-backend/
   - In-memory 30-minute TTL cache (`CACHE_TTL_SECONDS = 1800`) to conserve API credit limits.
   - Deterministic offline demo mode (`TAVILY_MOCK=1`) using SHA-1 hashing and `tavily_verify_mock.json` fixtures for resilient conference presentations.
 
+#### `content_cleaner.py`
+- **Role**: Generalized 4-Pass Markdown Article Sanitizer & Boilerplate Pruning Engine.
+- **Key Responsibilities**:
+  - **Pass 1 (Leading Junk Stripping)**: Removes standalone author byline links, comment anchors, view-count badges, and "Skip to content" remnants before the first body paragraph.
+  - **Pass 2 (Universal Tail Boundary Cutoff)**: Scans for universal editorial boundary headers (`About the Author`, `Further Reading`, `Related Stories/Articles`, `Trending Stories`, `Popular Discussions`, `Comments`, `Newsletter`) and cleanly slices off all subsequent peripheral CMS widgets.
+  - **Pass 3 (Inline Promo Stripping)**: Removes mid-article interruption banners (e.g. `[##### **Related Story** ...]`, `Read More: [Link]`, `SEE ALSO: [Link]`).
+  - **Pass 4 (Link-Density List Pruning)**: Algorithmic detector pruning bullet lists where $>60\%$ of tokens are hyperlinks, dropping aggregator widgets while preserving genuine comparison lists.
+  - **Safety Guardrail**: Reverts to boundary cut if sanitization results in $<400$ characters on articles originally $\ge 600$ characters.
+
 #### `ingest_tavily.py`
 - **Role**: Autonomous ingestion daemon harvesting live news across all 7 macro taxonomy categories.
 - **Key Responsibilities**:
   - Polls categories (`Tech`, `AI`, `Hardware`, `Automotive`, `Gaming`, `Finance`, `Science`).
   - Enforces URL canonicalization via `canonicalize_url()` prior to ingestion.
+  - Runs pre-ingestion Markdown cleaning with `clean_markdown_article()` to strip navigation chrome and tail clutter before payload creation.
   - Rejects shallow stubs (`len(text) < 250`) and caps maximum article length to 25,000 characters.
   - Defaults to one-shot mode (`--once`), with a credit-safe 12-hour interval (43,200s) and `--max 4` articles per category for continuous daemon operation (`--loop`).
   - Has a fail-fast startup check that halts execution (`sys.exit(1)`) if `INGESTION_SECRET` is unset.
@@ -94,6 +107,7 @@ rss-backend/
 - **Role**: Standalone background daemon polling un-enriched articles from PostgreSQL.
 - **Key Responsibilities**:
   - Continuously queries `SELECT * FROM articles WHERE is_processed = FALSE LIMIT 5 FOR UPDATE SKIP LOCKED`.
+  - Runs defensive sanitization with `clean_markdown_article()` before token truncation to ensure SLM triage and embeddings are computed over editorial prose.
   - Runs **Stage 1 (Triage)**: Invokes `LayaClassifier` to obtain `macro_tag`, `macro_tags`, `micro_tags`, `confidence_score`, and `on_topic_score`.
   - Handles **Noise Gating**: If classified as `Off-Topic`, marks `is_processed = TRUE` and bypasses expensive LLM summarization.
   - Runs **Stage 2 (Summarization)**: If confidence is high ($\ge 0.65$), sends a targeted, low-token TL;DR prompt to the LLM. If low, escalates to a full classification prompt.
@@ -125,6 +139,7 @@ rss-backend/
 - **Key Responsibilities**:
   - Defines supported macro categories: `Tech`, `AI`, `Hardware`, `Automotive`, `Gaming`, `Finance`, `Science`, `Off-Topic`.
   - Defines domain keywords and subtag dictionaries for automatic micro-tagging (e.g. `2nm`, `gaafet`, `solid_state_battery`, `steam_deck`, `autonomous_agents`).
+  - Enforces strict grouped regex word boundaries (`\b(?:electric vehicles?|evs?)\b`, `\b(?:james webb|jwst)\b`, `\b(?:european central bank|ecb)\b`) to prevent substring false-positive contamination (e.g. `dev` matching `ev`).
   - Provides helper functions: `normalize_macro_tag()`, `extract_domain_keywords()`, `clean_micro_tags()`.
 
 #### `db.py`
@@ -170,12 +185,19 @@ rss-backend/
 - **Role**: One-off migration script.
 - **Function**: Scans all processed articles where `embedding IS NULL`, generates dense embeddings using `TextEmbedder`, and updates the rows in PostgreSQL.
 
+#### `clean_articles_db.py`
+- **Role**: Database maintenance migration script.
+- **Function**: Scans all articles in PostgreSQL, strips leading navbars, trailing CMS aggregators, author social cards, and inline promotional interruption banners via `content_cleaner.py`, and cleans false-positive micro-tags in-place.
+
 #### `reindex_articles.py`
 - **Role**: Maintenance utility.
 - **Function**: Re-runs the `LayaClassifier` and `taxonomy` extraction over existing records to backfill new taxonomy tags and confidence scores.
 
 #### `tests/` Directory
 - `comprehensive_test_evaluation.py`: Master test suite executing all 9 evaluation tiers with dynamic SSE stream parsing and live article lookup.
+- `test_content_cleaner.py`: 4-pass Markdown sanitizer unit test suite verifying Wccftech CMS clutter stripping, technical code block preservation, link-density list pruning, and short article guardrails.
+- `test_tavily_integration.py`: Tavily integration, URL canonicalization, Markdown cleaning, and SSE streaming fact-checking tests.
+- `fixtures/tavily_verify_mock.json`: Deterministic Demo Mode verification fixtures.
 - `test_search_speed.py`: Measures execution latency for search queries across semantic vector spaces (empirically 25–65 ms).
 - `test_hybrid_enrichment.py`: Validates LayaClassifier cold-start, warmup time, and multi-domain classification accuracy.
 - `test_copilot_demo.py`: Verifies SSE chunk delivery and checks that hallucination prompts trigger grounded refusal.
@@ -327,11 +349,17 @@ curl -X POST "http://localhost:8000/api/intelligence/synthesize" `
 
 #### 3. Run Automated Test Suites
 ```powershell
-# Tavily Unit & Integration Test Suite (6 test scenarios):
+# Content Sanitizer Unit Test Suite (4-Pass Markdown Cleaner):
+.\venv\Scripts\python.exe tests/test_content_cleaner.py
+
+# Tavily Unit & Integration Test Suite (7 test scenarios):
 .\venv\Scripts\python.exe tests/test_tavily_integration.py
 
 # Master 9-Part End-to-End Regression Suite (100% Score across all 9 Tiers):
 .\venv\Scripts\python.exe tests/comprehensive_test_evaluation.py
+
+# Database Maintenance: Batch Sanitize Markdown & Clean Micro-Tags:
+.\venv\Scripts\python.exe clean_articles_db.py
 ```
 
 ---
