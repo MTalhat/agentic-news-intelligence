@@ -9,6 +9,9 @@ import time
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from taxonomy import (
     MACRO_CATEGORIES,
@@ -49,7 +52,7 @@ class LayaClassifier:
         return cls._instance
 
     def __init__(self):
-        self.conf_threshold = float(os.getenv("LAYA_CONFIDENCE_THRESHOLD", "0.65"))
+        self.conf_threshold = float(os.getenv("LAYA_CONFIDENCE_THRESHOLD", "0.40"))
         self.on_topic_threshold = float(os.getenv("LAYA_ON_TOPIC_THRESHOLD", "0.40"))
         self.model_name = os.getenv("LAYA_MODEL_NAME", "convaiinnovations/laya")
 
@@ -203,12 +206,11 @@ class LayaClassifier:
             micro_tags = clean_micro_tags(micro_tags, max_tags=6)
 
 
-            # Overall confidence combines macro and subtag confidences
-            avg_sub_conf = (sum(subtag_confidences) / len(subtag_confidences)) if subtag_confidences else 0.5
-            overall_conf = min(macro_conf, avg_sub_conf) if category_hint is None else avg_sub_conf
+            # Overall confidence is driven by primary macro domain classification across the 7 categories
+            overall_conf = macro_conf if category_hint is None else 1.0
 
             is_off_topic = on_topic_val < self.on_topic_threshold
-            needs_escalation = (overall_conf < self.conf_threshold) or (len(micro_tags) < 3)
+            needs_escalation = overall_conf < self.conf_threshold
 
             return TriageResult(
                 macro_tag=primary_macro,
