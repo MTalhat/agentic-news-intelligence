@@ -65,6 +65,22 @@ def generate_tldr_only(title: str, text: str, macro_tag: str, micro_tags: list) 
     prompt = f"Category: {macro_tag} ({', '.join(micro_tags)})\nTitle: {title}\n\nContent:\n{truncated}"
     
     try:
+        # Try json_schema first (strictly required by local LM Studio)
+        resp = ai_client.chat.completions.create(
+            model=FAST_MODEL,
+            temperature=0.0,
+            response_format={
+                "type": "json_schema", 
+                "json_schema": {"name": "tldr_only", "schema": ArticleTldrOut.model_json_schema()}
+            },
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_TLDR},
+                {"role": "user", "content": prompt}
+            ],
+            timeout=35.0
+        )
+    except Exception:
+        # Fallback for cloud providers (Nebius/OpenAI) that support json_object
         resp = ai_client.chat.completions.create(
             model=FAST_MODEL,
             temperature=0.0,
@@ -73,25 +89,8 @@ def generate_tldr_only(title: str, text: str, macro_tag: str, micro_tags: list) 
                 {"role": "system", "content": SYSTEM_PROMPT_TLDR},
                 {"role": "user", "content": prompt}
             ],
-            timeout=20.0
+            timeout=35.0
         )
-    except Exception as fe:
-        if "json_schema" in str(fe):
-            resp = ai_client.chat.completions.create(
-                model=FAST_MODEL,
-                temperature=0.0,
-                response_format={
-                    "type": "json_schema", 
-                    "json_schema": {"name": "tldr_only", "schema": ArticleTldrOut.model_json_schema()}
-                },
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT_TLDR},
-                    {"role": "user", "content": prompt}
-                ],
-                timeout=20.0
-            )
-        else:
-            raise fe
 
     data = json.loads(resp.choices[0].message.content)
     return data.get("tldr", "").strip()
@@ -105,30 +104,27 @@ def generate_full_enrichment(title: str, text: str, hint: str = "") -> tuple[str
         resp = ai_client.chat.completions.create(
             model=FAST_MODEL,
             temperature=0.0,
+            response_format={
+                "type": "json_schema", 
+                "json_schema": {"name": "enrichment", "schema": ArticleEnrichmentOut.model_json_schema()}
+            },
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_FULL},
+                {"role": "user", "content": prompt}
+            ],
+            timeout=35.0
+        )
+    except Exception:
+        resp = ai_client.chat.completions.create(
+            model=FAST_MODEL,
+            temperature=0.0,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT_FULL},
                 {"role": "user", "content": prompt}
             ],
-            timeout=25.0
+            timeout=35.0
         )
-    except Exception as fe:
-        if "json_schema" in str(fe):
-            resp = ai_client.chat.completions.create(
-                model=FAST_MODEL,
-                temperature=0.0,
-                response_format={
-                    "type": "json_schema", 
-                    "json_schema": {"name": "enrichment", "schema": ArticleEnrichmentOut.model_json_schema()}
-                },
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT_FULL},
-                    {"role": "user", "content": prompt}
-                ],
-                timeout=25.0
-            )
-        else:
-            raise fe
 
     raw = json.loads(resp.choices[0].message.content)
     parsed = ArticleEnrichmentOut(**raw)
@@ -209,38 +205,26 @@ def process_batch() -> bool:
                     )
                     continue
 
-                # 1B. Confident Triage -> Targeted Fast TL;DR Only
-                if not triage.needs_escalation:
-                    tldr = generate_tldr_only(title, safe_text, triage.macro_tag, triage.micro_tags)
-                    save_article_enrichment(
-                        art_id,
-                        macro=triage.macro_tag,
-                        macro_tags=triage.macro_tags,
-                        micro=triage.micro_tags,
-                        tldr=tldr,
-                        title=title,
-                        conf=triage.confidence,
-                        on_topic=triage.on_topic_score
-                    )
-                    total_ms = (time.perf_counter() - t0) * 1000
-                    logger.info(
-                        "[Worker Hybrid] %s -> %s / %s (Laya: %.0fms | Conf: %.2f | Total: %.0fms)",
-                        title[:30], triage.macro_tags, triage.micro_tags, triage.latency_ms, triage.confidence, total_ms
-                    )
-                    continue
-
-                # 1C. Low-Confidence Edge Case -> Escalate to Generative LLM
-                hint = f"[Triage Suggestion: Likely {triage.macro_tags} (conf: {triage.confidence:.2f})]\n"
-                logger.info("[Worker Escalation] %s (Laya conf: %.2f < threshold)", title[:30], triage.confidence)
-                macro, micro, tldr = generate_full_enrichment(title, safe_text, hint=hint)
+                # 1B. SLM-Led Triage -> Generative TL;DR Only
+                tldr = generate_tldr_only(title, safe_text, triage.macro_tag, triage.micro_tags)
                 save_article_enrichment(
-                    art_id, macro=macro, macro_tags=[macro], micro=micro, tldr=tldr,
-                    title=title, conf=triage.confidence, on_topic=triage.on_topic_score
+                    art_id,
+                    macro=triage.macro_tag,
+                    macro_tags=triage.macro_tags,
+                    micro=triage.micro_tags,
+                    tldr=tldr,
+                    title=title,
+                    conf=triage.confidence,
+                    on_topic=triage.on_topic_score
                 )
-                logger.info("[Worker Escalated Enriched] %s -> %s / %s", title[:30], macro, micro)
+                total_ms = (time.perf_counter() - t0) * 1000
+                logger.info(
+                    "[Worker Hybrid] %s -> %s / %s (Laya: %.0fms | Conf: %.2f | Total: %.0fms)",
+                    title[:30], triage.macro_tags, triage.micro_tags, triage.latency_ms, triage.confidence, total_ms
+                )
                 continue
 
-            # --- STAGE 2: Fallback Standard LLM Enrichment ---
+            # --- STAGE 2: Fallback Standard LLM Enrichment (only if Laya completely disabled) ---
             macro, micro, tldr = generate_full_enrichment(title, safe_text)
             save_article_enrichment(art_id, macro=macro, macro_tags=[macro], micro=micro, tldr=tldr, title=title)
             logger.info("[Worker Legacy Enriched] %s -> %s / %s", title[:30], macro, micro)
