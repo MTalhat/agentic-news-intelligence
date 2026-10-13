@@ -51,6 +51,31 @@ test_cases = [
 
 results = []
 
+import json
+
+# Dynamically find relevant rich articles from database feed
+try:
+    r_feed = requests.get("http://localhost:8000/api/articles", params={"page_size": 50})
+    if r_feed.status_code == 200 and r_feed.json():
+        articles = r_feed.json()
+        def find_id(kw, fallback_id):
+            for a in articles:
+                if kw.lower() in a.get("title", "").lower():
+                    return str(a["id"])
+            return fallback_id
+
+        porsche_id = find_id("quantumscape", "bf07dc92-4550-4f46-9cf1-f00bd01aaa09")
+        nvidia_id = find_id("nvidia", "eba0b28d-baab-49ff-a32e-687553cebc1d")
+        deck_id = find_id("steam deck", "16b5a828-ad47-48da-88a9-8bab67bc7b3d")
+
+        test_cases[0]["article_id"] = porsche_id
+        test_cases[1]["article_id"] = deck_id
+        test_cases[2]["article_id"] = nvidia_id
+        test_cases[3]["article_id"] = nvidia_id
+        test_cases[4]["article_id"] = nvidia_id
+except Exception:
+    pass
+
 for idx, tc in enumerate(test_cases, 1):
     header = f"[{idx}/5] {tc['title']}\nArticle ID: {tc['article_id']}\nQuestion: {tc['body']['question']}"
     if tc['body']['history']:
@@ -59,8 +84,24 @@ for idx, tc in enumerate(test_cases, 1):
 
     url = f"http://localhost:8000/api/articles/{tc['article_id']}/chat"
     resp = requests.post(url, json=tc['body'], stream=True)
-    tokens = [chunk.decode('utf-8') for chunk in resp.iter_content(chunk_size=None)]
-    output = "".join(tokens).strip()
+    
+    output_tokens = []
+    for line in resp.iter_lines():
+        if line:
+            decoded = line.decode('utf-8')
+            if decoded.startswith("data: "):
+                payload = decoded[6:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    data_obj = json.loads(payload)
+                    if "token" in data_obj:
+                        output_tokens.append(data_obj["token"])
+                    elif "error" in data_obj:
+                        output_tokens.append(f" [ERROR: {data_obj['error']}] ")
+                except Exception:
+                    output_tokens.append(payload)
+    output = "".join(output_tokens).strip()
     
     print(f"Copilot Output:\n{output}\n", flush=True)
     results.append(f"{header}\n\nCopilot Output:\n{output}\n" + "-"*50)

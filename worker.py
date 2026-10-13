@@ -181,12 +181,14 @@ def process_batch() -> bool:
 
     for art_id, title, text in batch:
         try:
+            # Bound text strictly to 20,000 chars to protect SLM/LLM token limits
+            safe_text = (text or "")[:20000]
             t0 = time.perf_counter()
             triage = None
 
             # --- STAGE 1: Fast Sub-100ms SLM Triage (if enabled) ---
             if has_classifier:
-                triage = classifier.classify(title, text)
+                triage = classifier.classify(title, safe_text)
 
             if triage is not None:
                 # 1A. Noise / Spam Filter Gate
@@ -209,7 +211,7 @@ def process_batch() -> bool:
 
                 # 1B. Confident Triage -> Targeted Fast TL;DR Only
                 if not triage.needs_escalation:
-                    tldr = generate_tldr_only(title, text, triage.macro_tag, triage.micro_tags)
+                    tldr = generate_tldr_only(title, safe_text, triage.macro_tag, triage.micro_tags)
                     save_article_enrichment(
                         art_id,
                         macro=triage.macro_tag,
@@ -230,7 +232,7 @@ def process_batch() -> bool:
                 # 1C. Low-Confidence Edge Case -> Escalate to Generative LLM
                 hint = f"[Triage Suggestion: Likely {triage.macro_tags} (conf: {triage.confidence:.2f})]\n"
                 logger.info("[Worker Escalation] %s (Laya conf: %.2f < threshold)", title[:30], triage.confidence)
-                macro, micro, tldr = generate_full_enrichment(title, text, hint=hint)
+                macro, micro, tldr = generate_full_enrichment(title, safe_text, hint=hint)
                 save_article_enrichment(
                     art_id, macro=macro, macro_tags=[macro], micro=micro, tldr=tldr,
                     title=title, conf=triage.confidence, on_topic=triage.on_topic_score
@@ -239,7 +241,7 @@ def process_batch() -> bool:
                 continue
 
             # --- STAGE 2: Fallback Standard LLM Enrichment ---
-            macro, micro, tldr = generate_full_enrichment(title, text)
+            macro, micro, tldr = generate_full_enrichment(title, safe_text)
             save_article_enrichment(art_id, macro=macro, macro_tags=[macro], micro=micro, tldr=tldr, title=title)
             logger.info("[Worker Legacy Enriched] %s -> %s / %s", title[:30], macro, micro)
 

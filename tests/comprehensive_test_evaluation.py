@@ -48,10 +48,44 @@ except Exception as e:
     record_result("Feed & Filtering", False, 0, 10, str(e))
     print(f"  --> FAIL: {e}")
 
-# Get reference IDs
+def read_sse_stream(response):
+    """Parses standard Server-Sent Events (data: {...}) stream into combined text."""
+    collected = []
+    for line in response.iter_lines():
+        if line:
+            decoded = line.decode('utf-8')
+            if decoded.startswith("data: "):
+                payload = decoded[6:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    data_obj = json.loads(payload)
+                    if "token" in data_obj:
+                        collected.append(data_obj["token"])
+                    elif "error" in data_obj:
+                        collected.append(f" ERROR: {data_obj['error']} ")
+                except Exception:
+                    collected.append(payload)
+    return "".join(collected)
+
+# Dynamic reference IDs lookup with robust fallbacks
 steam_deck_id = "16b5a828-ad47-48da-88a9-8bab67bc7b3d"
 wired_battery_id = "82a5ecf9-e6ab-4152-afae-5ca536361bd5"
 electrek_battery_id = "bf07dc92-4550-4f46-9cf1-f00bd01aaa09"
+
+try:
+    r_all = requests.get(f"{BASE_URL}/api/articles", params={"page_size": 50})
+    if r_all.status_code == 200:
+        for a in r_all.json():
+            t = a.get("title", "").lower()
+            if "steam deck" in t:
+                steam_deck_id = str(a["id"])
+            elif "quantumscape" in t:
+                electrek_battery_id = str(a["id"])
+            elif "automaker" in t:
+                wired_battery_id = str(a["id"])
+except Exception:
+    pass
 
 # -------------------------------------------------------------
 # 2. GET /api/articles/{article_id} (Full Article Detail)
@@ -196,8 +230,7 @@ try:
         "question": "What display refresh rate and panel type does Steam Deck 2 have?"
     }
     r_chat = requests.post(f"{BASE_URL}/api/articles/{steam_deck_id}/chat", json=q_fact, stream=True)
-    tokens = [chunk.decode('utf-8') for chunk in r_chat.iter_content(chunk_size=None)]
-    ans = "".join(tokens).lower()
+    ans = read_sse_stream(r_chat).lower()
 
     has_oled = "oled" in ans
     has_120 = "120" in ans or "vrr" in ans
@@ -222,8 +255,7 @@ try:
         "question": "Does this article state that Nintendo announced a new Zelda game for it?"
     }
     r_trick = requests.post(f"{BASE_URL}/api/articles/{steam_deck_id}/chat", json=q_trick, stream=True)
-    tokens = [chunk.decode('utf-8') for chunk in r_trick.iter_content(chunk_size=None)]
-    ans_trick = "".join(tokens).lower()
+    ans_trick = read_sse_stream(r_trick).lower()
 
     refused = any(p in ans_trick for p in ["not state", "does not mention", "no", "not mentioned", "not in the text"])
 
@@ -246,8 +278,7 @@ try:
         "article_ids": [electrek_battery_id, wired_battery_id]
     }
     r_synth = requests.post(f"{BASE_URL}/api/intelligence/synthesize", json=synth_req, stream=True)
-    tokens = [chunk.decode('utf-8') for chunk in r_synth.iter_content(chunk_size=None)]
-    synth_text = "".join(tokens)
+    synth_text = read_sse_stream(r_synth)
 
     has_consensus = any(w in synth_text.lower() for w in ["consensus", "agree", "shared"])
     has_discrepancy = any(w in synth_text.lower() for w in ["discrepanc", "contradiction", "disagree", "contrast", "differ"])

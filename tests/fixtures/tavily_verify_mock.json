@@ -1,0 +1,14 @@
+{
+  "available": true,
+  "answer": "Tavily Demo Verification Wire: Cross-source validation confirms solid-state electrolyte battery density gains of 40% over lithium-ion baseline.",
+  "sources": [
+    {
+      "title": "Tavily Demo Verification Wire: Solid-State Battery Benchmarks",
+      "url": "https://demo.tavily.internal/energy/solid-state-breakthrough",
+      "domain": "demo.tavily.internal",
+      "snippet": "Demonstration evidence confirms 800 Wh/L volumetric energy density across 1,000 thermal cycles with zero dendritic shorting.",
+      "is_demo": true
+    }
+  ],
+  "context_text": "EXTERNAL AI CONSENSUS OVERVIEW:\nIndependent laboratory telemetry confirms 800 Wh/L volumetric energy density across 1,000 thermal cycles.\n\nINDEPENDENT THIRD-PARTY CITATIONS:\n[T1] Tavily Demo Verification Wire: Solid-State Battery Benchmarks (https://demo.tavily.internal/energy/solid-state-breakthrough)\nSnippet: Demonstration evidence confirms 800 Wh/L volumetric energy density across 1,000 thermal cycles."
+}

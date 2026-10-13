@@ -12,8 +12,8 @@ A high-performance news aggregation, asynchronous AI enrichment, and multi-agent
 
 ### 2. Multi-Tier AI Agent Architecture
 - **Tier 1 — Intent-Driven Search** (`/api/search`): Analyzes natural language search queries to infer category and tag intents, queried against PostgreSQL GIN indexes with full-text search fallback.
-- **Tier 2 — Grounded Article Copilot** (`/api/articles/{id}/chat`): Streams real-time grounded conversational answers strictly anchored to article content with anti-hallucination guardrails.
-- **Tier 3 — Multi-Source Consensus & Discrepancy Agent** (`/api/intelligence/synthesize`): Cross-examines multiple news sources on a topic to extract:
+- **Tier 2 — Grounded Article Copilot** (`/api/articles/{id}/chat`): Streams real-time grounded conversational answers over Server-Sent Events (`text/event-stream`) strictly anchored to article content with anti-hallucination guardrails.
+- **Tier 3 — Multi-Source Consensus & Discrepancy Agent** (`/api/intelligence/synthesize`): Cross-examines multiple news sources on a topic over SSE to extract:
   1. **Shared Consensus** (Points agreed on by all outlets)
   2. **Framing Discrepancies & Contradictions** (Where outlets spin, diverge, or omit facts)
   3. **Singular / Unverified Claims**
@@ -72,15 +72,21 @@ python worker.py
 
 ## 🧪 Testing & Verification
 
-- **Evaluation Suite**:
+All automated tests are located in the [`tests/`](tests) folder:
+
+- **Comprehensive Regression Suite**:
   ```bash
-  python comprehensive_test_evaluation.py
+  python tests/comprehensive_test_evaluation.py
   ```
-- **Copilot Grounding Demo**:
+- **Copilot Grounding & SSE Demo**:
   ```bash
-  python test_copilot_demo.py
+  python tests/test_copilot_demo.py
+  ```
+- **Vector Search Speed Benchmarks**:
+  ```bash
+  python tests/test_search_speed.py
   ```
 - **Seed Ingestion**:
   ```bash
-  python test_seed.py
+  python tests/test_seed.py
   ```

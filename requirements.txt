@@ -7,3 +7,7 @@ openai>=1.14.0
 python-dotenv>=1.0.1
 python-dateutil>=2.9.0
 requests>=2.31.0
+torch>=2.2.0
+sentence-transformers>=2.6.0
+laya>=0.4.2
+tavily-python>=0.3.3
