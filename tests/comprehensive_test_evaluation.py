@@ -36,7 +36,10 @@ try:
     gaming_articles = r2.json()
 
     feed_ok = r1.status_code == 200 and len(all_articles) >= 10
-    filter_ok = r2.status_code == 200 and len(gaming_articles) >= 1 and all(a["macro_tag"].lower() == "gaming" for a in gaming_articles)
+    filter_ok = r2.status_code == 200 and len(gaming_articles) >= 1 and all(
+        (a.get("macro_tag") or "").lower() == "gaming" or "gaming" in [m.lower() for m in a.get("macro_tags", [])]
+        for a in gaming_articles
+    )
 
     if feed_ok and filter_ok:
         record_result("Feed & Filtering", True, 10, 10, f"Retrieved {len(all_articles)} total articles, filtered {len(gaming_articles)} Gaming articles with 100% precision", f"Gaming title: {gaming_articles[0]['title']}")

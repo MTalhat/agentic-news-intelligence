@@ -18,6 +18,7 @@ from schemas import (
 )
 from tavily_service import web_verify, search_news
 from url_utils import canonicalize_url, extract_domain
+from content_cleaner import clean_article_markdown
 
 logger = logging.getLogger("main")
 
@@ -73,12 +74,14 @@ def ingest_articles(items: list[ScrapedArticleIn], x_secret: str = Header(...)):
             except Exception:
                 pub_date = datetime.utcnow()
 
+            cleaned_content = clean_article_markdown(item.Baslik, item.TamMetin)
+
             cur.execute("""
                 INSERT INTO articles (url_hash, source_feed, title, original_url, author, published_at, clean_text)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (url_hash) DO NOTHING
                 RETURNING id;
-            """, (url_hash, item.Site, item.Baslik, canonical_link, item.Yazar, pub_date, item.TamMetin))
+            """, (url_hash, item.Site, item.Baslik, canonical_link, item.Yazar, pub_date, cleaned_content))
             if cur.fetchone():
                 inserted += 1
 

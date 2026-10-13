@@ -104,7 +104,7 @@ DOMAIN_KEYWORD_RULES = [
     (r"\bquantumscape\b", "quantumscape"),
     (r"\bporsche\b", "porsche"),
     (r"\bendurance\b", "endurance_testing"),
-    (r"\belectric vehicle|ev\b", "electric_vehicles"),
+    (r"\b(?:electric vehicles?|evs?)\b", "electric_vehicles"),
     # AI & Agents
     (r"\bautonomous agent\b", "autonomous_agents"),
     (r"\banthropic\b", "anthropic"),
@@ -117,13 +117,13 @@ DOMAIN_KEYWORD_RULES = [
     (r"\bcryptograph\w+", "cryptography"),
     (r"\bnist\b", "nist_standards"),
     # Space & Science
-    (r"\bjames webb|jwst\b", "jwst"),
+    (r"\b(?:james webb|jwst)\b", "jwst"),
     (r"\bexoplanet\b", "exoplanet"),
     (r"\bbiosignature\b", "biosignatures"),
     (r"\bk2-18b\b", "k2_18b"),
     # Finance & Central Banking
     (r"\bdigital euro\b", "digital_euro"),
-    (r"\beuropean central bank|ecb\b", "ecb"),
+    (r"\b(?:european central bank|ecb)\b", "ecb"),
     (r"\bsettlement\b", "settlement"),
     (r"\binterbank\b", "interbank"),
 ]

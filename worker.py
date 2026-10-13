@@ -7,6 +7,7 @@ from ai import ai_client, FAST_MODEL
 from schemas import ArticleEnrichmentOut, ArticleTldrOut
 from classifier import LayaClassifier
 from embedder import get_embedder
+from content_cleaner import clean_markdown_article
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("worker")
@@ -202,8 +203,9 @@ def process_batch() -> bool:
 
     for art_id, title, text in batch:
         try:
-            # Bound text strictly to 20,000 chars to protect SLM/LLM token limits
-            safe_text = (text or "")[:20000]
+            # Defensive cleaning to strip tail widgets before Laya triage & embedding
+            cleaned_body, _ = clean_markdown_article(text or "")
+            safe_text = cleaned_body[:20000] if len(cleaned_body) >= 200 else (text or "")[:20000]
             t0 = time.perf_counter()
             triage = None
 

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from tavily_service import search_news
 from url_utils import canonicalize_url, extract_domain
+from content_cleaner import clean_article_markdown
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -105,6 +106,7 @@ def harvest_and_ingest(max_per_topic: int = 4, target_total: int = 0) -> tuple[i
                 clean_url = canonicalize_url(raw_url)
                 title = r.get("title", "").strip()
                 text = (r.get("raw_content") or r.get("content") or "").strip()
+                text = clean_article_markdown(title, text)
 
                 if len(text) < 250 or not clean_url or not title:
                     continue

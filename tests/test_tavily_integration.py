@@ -78,6 +78,23 @@ def test_sse_parser_tolerance():
     assert "Shared Consensus" in result_text
     assert "Framing Discrepancies" in result_text
 
+def test_clean_article_markdown():
+    from content_cleaner import clean_article_markdown
+    raw_sample = (
+        "[Discord](https://discord.gg) * [Home](https://site.com)\n\n"
+        "# Google DeepMind Releases EmbeddingGemma 2\n\n"
+        "Google DeepMind has introduced EmbeddingGemma 2, a 740M multimodal model.\n\n"
+        "#### RELATED ARTICLES\n\n"
+        "* Mistral AI Releases Large Model\n"
+        "© Copyright 2026 Media Inc"
+    )
+    cleaned = clean_article_markdown("Google DeepMind Releases EmbeddingGemma 2", raw_sample)
+    assert "# Google DeepMind Releases EmbeddingGemma 2" in cleaned
+    assert "740M multimodal model" in cleaned
+    assert "Discord" not in cleaned
+    assert "RELATED ARTICLES" not in cleaned
+    assert "Copyright" not in cleaned
+
 if __name__ == "__main__":
     print("=" * 60)
     print("      RUNNING TAVILY INTEGRATION UNIT TEST SUITE")
@@ -86,6 +103,8 @@ if __name__ == "__main__":
     print("✓ test_canonicalize_url PASSED")
     test_extract_domain()
     print("✓ test_extract_domain PASSED")
+    test_clean_article_markdown()
+    print("✓ test_clean_article_markdown PASSED")
     test_mock_search_news()
     print("✓ test_mock_search_news PASSED")
     test_mock_web_verify()
@@ -94,4 +113,5 @@ if __name__ == "__main__":
     print("✓ test_byte_safe_hmac PASSED")
     test_sse_parser_tolerance()
     print("✓ test_sse_parser_tolerance PASSED")
-    print("\n[ALL 6 TAVILY INTEGRATION TESTS PASSED]")
+    print("\n[ALL 7 TAVILY INTEGRATION TESTS PASSED]")
+
