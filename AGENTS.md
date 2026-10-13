@@ -291,7 +291,10 @@ In a new terminal window:
 #### Step 4: Run Tavily Autonomous News Ingestion
 In a new terminal window:
 ```powershell
-# One-shot harvest across all 7 macro taxonomy categories:
+# Balanced bulk harvest (e.g. 200 articles equally split across all 7 categories):
+.\venv\Scripts\python.exe ingest_tavily.py --target 200
+
+# Quick one-shot harvest (4 per category):
 .\venv\Scripts\python.exe ingest_tavily.py --once
 
 # Or continuous daemon mode (runs every 4 hours, credit-safe):
