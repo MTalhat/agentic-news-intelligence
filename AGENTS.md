@@ -142,23 +142,30 @@ rss-backend/
   - Deterministic offline demo mode (`TAVILY_MOCK=1`) using SHA-1 hashing and `tavily_verify_mock.json` fixtures for resilient conference presentations.
 
 #### `content_cleaner.py`
-- **Role**: Generalized 4-Pass Markdown Article Sanitizer & Boilerplate Pruning Engine.
+- **Role**: Generalized 4-Pass Markdown Article Sanitizer, Boilerplate Pruner & Context-Safe Rejection Engine.
 - **Key Responsibilities**:
   - **Pass 1 (Leading Junk Stripping)**: Removes standalone author byline links, comment anchors, view-count badges, and "Skip to content" remnants before the first body paragraph.
-  - **Pass 2 (Universal Tail Boundary Cutoff)**: Scans for universal editorial boundary headers (`About the Author`, `Further Reading`, `Related Stories/Articles`, `Trending Stories`, `Popular Discussions`, `Comments`, `Newsletter`) and cleanly slices off all subsequent peripheral CMS widgets.
-  - **Pass 3 (Inline Promo Stripping)**: Removes mid-article interruption banners (e.g. `[##### **Related Story** ...]`, `Read More: [Link]`, `SEE ALSO: [Link]`).
+  - **Pass 2 (Two-Tier Tail Boundary Cutoff)**:
+    - *Strong Tail Boundary*: Unconditionally terminates text at definite termination markers (`Related Stories/Articles`, `Trending Stories`, `Popular Discussions`, `Comments`, `Discussion`, `Leave a Reply`, `Recommended Stories`) once depth exceeds 600 characters.
+    - *Weak Tail Boundary*: Position-guarded termination at boundary headers (`About the Author`, `Further Reading`, `Newsletter`, `Sources`) only when appearing at $\ge 55\%$ document depth and $\ge 600$ characters, preventing false cutoffs on early narrative mentions.
+  - **Pass 3 (Inline Promo & Banner Stripping)**: Removes mid-article interruption banners line-by-line (e.g. `[##### **Related Story** ...]`, `Read More: [Link]`, `SEE ALSO: [Link]`, newsletter subscription callouts) without truncating subsequent paragraphs.
   - **Pass 4 (Link-Density List Pruning)**: Algorithmic detector pruning bullet lists where $>60\%$ of tokens are hyperlinks, dropping aggregator widgets while preserving genuine comparison lists.
-  - **Safety Guardrail**: Reverts to boundary cut if sanitization results in $<400$ characters on articles originally $\ge 600$ characters.
+  - **Context-Safe Rejection Gates**:
+    - `_is_error_or_bot_page`: Flags 404, Cloudflare, CAPTCHA, or bot-blocked stub pages ($< 1500$ chars or in lead 350 chars), while preserving legitimate editorial coverage of cloud outages ($\ge 1500$ chars).
+    - `_is_paywall_stub`: Drops shallow subscription prompts ($< 2500$ chars).
+    - `_is_ui_or_sidebar_dump`: Drops navigation chrome, stock ticker price dumps, and sidebar link aggregators lacking body punctuation or title-word alignment.
+  - **Paragraph Deduplication**: Strips repeated CMS paragraphs with strict code-block fence (` ``` `) awareness.
+  - **Shingle Extraction**: `extract_normalized_shingles(text, k=5)` extracts normalized word shingles for downstream Jaccard-based syndicated wire copy deduplication.
 
 #### `ingest_tavily.py`
 - **Role**: Autonomous ingestion daemon harvesting live news across all 7 macro taxonomy categories.
 - **Key Responsibilities**:
-  - Polls categories (`Tech`, `AI`, `Hardware`, `Automotive`, `Gaming`, `Finance`, `Science`).
-  - Enforces URL canonicalization via `canonicalize_url()` prior to ingestion.
-  - Runs pre-ingestion Markdown cleaning with `clean_markdown_article()` to strip navigation chrome and tail clutter before payload creation.
-  - Rejects shallow stubs (`len(text) < 250`) and caps maximum article length to 25,000 characters.
-  - Defaults to one-shot mode (`--once`), with a credit-safe 12-hour interval (43,200s) and `--max 4` articles per category for continuous daemon operation (`--loop`).
-  - Has a fail-fast startup check that halts execution (`sys.exit(1)`) if `INGESTION_SECRET` is unset.
+  - **Taxonomy Sub-Query Rotation**: Maps each of the 7 macro categories to 3 curated, high-yield sub-queries (21 total search vectors) rotating cyclically across harvest cycles via atomic `.ingest_state.json` persistence.
+  - **Date Poisoning Protection**: `_parse_and_validate_date()` rejects future timestamps ($> \text{now} + 2\text{h}$) and stale articles ($> 14$ days old), with safe fallback to `datetime.now(timezone.utc)`.
+  - **Syndicated Wire Copy Deduplication**: In addition to canonical URL tracking and SHA-256 full-content hashing, computes Jaccard similarity across 5-word shingles to drop syndicated duplicates ($\ge 0.65$ similarity).
+  - **Safe Markdown Truncation**: `_truncate_markdown_safely()` respects sentence and paragraph boundaries when capping articles at 25,000 characters and balances unclosed markdown code fences (` ``` `).
+  - **Network & Auth Resilience**: Implements exponential backoff retries (up to 2 retries) on 5xx or connection errors, while aborting immediately on 401/403 authorization failures.
+  - **Execution Modes**: Defaults to credit-safe one-shot rotation (`--once`, 7 queries, `--max 4`), continuous daemon operation (`--loop`, interval 43,200s), or all-query batch ingestion (`--all-queries`).
 
 #### `url_utils.py`
 - **Role**: URL sanitization and domain parsing utility.
@@ -264,6 +271,7 @@ rss-backend/
 
 #### `tests/` Directory
 - `comprehensive_test_evaluation.py`: Master test suite executing all 9 evaluation tiers with dynamic SSE stream parsing and live article lookup.
+- `test_ingestion_and_cleaner.py`: 10-Tier unit and regression test suite verifying two-tier tail boundaries, inline promo stripping, leading boilerplate cleanup, error/bot gate, UI ticker dump gate, code fence paragraph deduplication, safe markdown truncation, future/stale date validation, and syndicated wire copy shingle detection.
 - `test_user_personalization.py`: 7-Tier verification suite covering taxonomy hierarchy, natural language interest embedding, zero-leakage personalized feed, like/unlike toggling with EMA vector shift, and daily rotating digest caching.
 - `test_content_cleaner.py`: 4-pass Markdown sanitizer unit test suite verifying Wccftech CMS clutter stripping, technical code block preservation, link-density list pruning, and short article guardrails.
 - `test_tavily_integration.py`: Tavily integration, URL canonicalization, Markdown cleaning, and SSE streaming fact-checking tests.

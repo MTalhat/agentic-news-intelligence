@@ -47,3 +47,6 @@ htmlcov/
 *~
 .DS_Store
 Thumbs.db
+
+# Ingestion state
+.ingest_state.json
