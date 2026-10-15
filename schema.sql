@@ -6,8 +6,18 @@ CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     username VARCHAR(50) UNIQUE NOT NULL,
     avatar_url TEXT,
+    preferred_macro_tags TEXT[] DEFAULT '{}',
+    preferred_micro_tags TEXT[] DEFAULT '{}',
+    onboarding_completed BOOLEAN DEFAULT FALSE,
+    interest_embedding vector(384),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Backward-compatible migrations for existing user tables
+ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_macro_tags TEXT[] DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_micro_tags TEXT[] DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS interest_embedding vector(384);
 
 -- 2. Articles (Normalized from Scraper JSON)
 CREATE TABLE IF NOT EXISTS articles (
@@ -47,7 +57,35 @@ CREATE TABLE IF NOT EXISTS article_comments (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 4. High-Performance Search & Filter Indexes
+-- 4. Social Interactions & Likes (Toggleable)
+CREATE TABLE IF NOT EXISTS user_article_interactions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    article_id UUID REFERENCES articles(id) ON DELETE CASCADE,
+    interaction_type VARCHAR(20) NOT NULL, -- 'like', 'bookmark', 'read'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (user_id, article_id, interaction_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_interactions_user_type ON user_article_interactions (user_id, interaction_type);
+CREATE INDEX IF NOT EXISTS idx_interactions_article ON user_article_interactions (article_id);
+
+-- 5. Daily Intelligence Digests Cache (Rotates Every 24 Hours)
+CREATE TABLE IF NOT EXISTS daily_intelligence_digests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    digest_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    macro_tag VARCHAR(50) NOT NULL,
+    cluster_title TEXT NOT NULL,
+    article_ids UUID[] NOT NULL,
+    tavily_evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    synthesis_markdown TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (digest_date, macro_tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_digests_date_macro ON daily_intelligence_digests (digest_date, macro_tag);
+
+-- 6. High-Performance Search & Filter Indexes
 CREATE INDEX IF NOT EXISTS idx_articles_url_hash ON articles (url_hash);
 CREATE INDEX IF NOT EXISTS idx_articles_is_processed ON articles (is_processed);
 CREATE INDEX IF NOT EXISTS idx_articles_macro_tag ON articles (macro_tag);

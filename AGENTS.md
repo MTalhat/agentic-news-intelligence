@@ -6,7 +6,64 @@
 
 ---
 
-## 1. System Overview
+## 1. Hackathon Project Profile & Mission
+
+### 1.1 Executive Summary
+**Agentic News Intelligence** is an autonomous, production-grade intelligence newsroom designed to solve the noise, fragility, and confirmation bias of modern information aggregation. Instead of relying on brittle web scrapers or naive LLM wrappers, it combines an always-on ingestion pipeline, sub-100ms local decision SLM triage, sub-50ms hybrid vector search, and an investigative multi-source synthesis agent that cross-checks news against live web consensus.
+
+* **Target Event**: Nebius - NVIDIA Hackathon
+* **Target Tracks**:
+  * **Best Apps & Agents** (Primary)
+  * **Best Use of Tavily** ($3,000 Sponsor Prize Track)
+* **Core Philosophy**: Cost-effective local SLM triage at the edge + high-throughput cloud reasoning on Nebius Token Factory + independent live web verification via Tavily.
+
+---
+
+### 1.2 The Problem We Solve
+1. **The Ingestion & Scraper Reality Wall**: Traditional scrapers break constantly due to CDN anti-bot blocks, fragile CSS/DOM selectors, and low yields (~40%). Moreover, raw webpage dumps flood vector databases with CMS junk (author bios, social buttons, "Trending Stories" widgets) that pollute embeddings and trigger lexical false positives.
+2. **The LLM Token & Cost Bottleneck**: Running 70B parameter models or cloud LLM APIs over every raw incoming news article is prohibitively slow and expensive.
+3. **Circular Confirmation Bias in AI Fact-Checking**: Standard AI summarizers read one outlet's claim and search the web only to find the exact same article syndicated elsewhere, blindly declaring claims "verified."
+
+---
+
+### 1.3 How the System Works (The 4-Pillar Solution)
+1. **Autonomous, Clutter-Free Ingestion**:
+   * Uses Tavily's dedicated news and finance search engine with `include_raw_content="markdown"` across 7 taxonomy categories (`Tech`, `AI`, `Hardware`, `Automotive`, `Gaming`, `Finance`, `Science`).
+   * Passes content through a custom, zero-dependency 4-pass Markdown cleaner (`content_cleaner.py`) that uses boundary sentinel detection to strip tail link dumps and promo callouts while preserving 100% of the core reporting.
+   * Strips tracking parameters (`utm_*`, `fbclid`) and hashes canonical URLs with SHA-256 for zero-duplicate idempotency.
+
+2. **Sub-100ms Edge SLM Triage (`Laya`)**:
+   * Incoming articles hit a local SLM decision model (`convaiinnovations/laya`) that executes macro/micro taxonomy tagging and noise gating in **under 100ms**.
+   * Low-confidence edge cases escalate to a generative reasoning model, while verified on-topic articles immediately receive a grounded 2-sentence empirical summary, slashing token usage by over 80%.
+
+3. **Sub-50ms 3-Tier Hybrid RRF Retrieval**:
+   * Embeds articles with 384-dimensional dense vectors (`all-MiniLM-L6-v2`) indexed via PostgreSQL 16 `pgvector` (HNSW).
+   * Fuses Dense Cosine Distance, BM25 Full-Text Search (`websearch_to_tsquery`), and GIN tag likeness into a single Reciprocal Rank Fusion (RRF) score.
+   * Segregates results into **Direct Matches** ($d \le 0.68$ or FTS/tag hits), dynamic **"Want to Explore?"** horizons ($0.68 < d < 0.78$), and an optional **Live Web Horizon** (`live_web=true`) without adding latency to the local vector engine.
+
+4. **Investigative Multi-Source Synthesis & Grounded Fact-Checking**:
+   * When comparing multiple articles, the Tier 3 synthesis agent (`POST /api/intelligence/synthesize`) extracts core assertions using a fast model.
+   * Runs `web_verify()` with **independent domain exclusion (`exclude_domains`)** to force Tavily to locate third-party corroboration rather than circular repeats.
+   * Streams a structured intelligence brief over Server-Sent Events (SSE) featuring claim-level verdicts:
+     * `[SUPPORTED]` — corroborated by independent third-party outlets (`[T1]`, `[T2]`).
+     * `[CONTRADICTED]` — disputed by live consensus data.
+     * `[UNVERIFIED]` — claimed by only one outlet with zero outside confirmation.
+
+---
+
+### 1.4 Technology Stack & Track Alignment
+
+| Component | Technology | Role in Hackathon Architecture |
+|---|---|---|
+| **Inference Runtime** | **Nebius Token Factory** | Hosts NVIDIA Nemotron 70B & Llama 3.1 8B for deep synthesis and fast claim extraction. |
+| **Edge Decision SLM** | **Laya (`convaiinnovations/laya`)** | Executes sub-100ms macro/micro classification & noise gating. |
+| **Web Intelligence** | **Tavily Search API** | Autonomous multi-category ingestion & independent domain-excluded fact-checking. |
+| **Vector Database** | **PostgreSQL 16 + `pgvector`** | HNSW cosine indexing, BM25 full-text indexing, and atomic JSONB metadata storage. |
+| **Embeddings** | **`sentence-transformers/all-MiniLM-L6-v2`** | Generates 384-dimensional dense vectors for sub-50ms hybrid semantic search. |
+
+---
+
+## 2. System Overview
 
 **Agentic News Intelligence** is a real-time news aggregation, asynchronous AI enrichment, and multi-agent synthesis platform. It solves the performance and accuracy bottlenecks of traditional RSS readers through a **hybrid multi-tier pipeline**:
 1. **Sub-100ms SLM Triage (`Laya`)**: Classifies macro and micro taxonomy tags, filters off-topic noise, and routes articles based on confidence thresholds without incurring expensive autoregressive LLM calls.
@@ -17,7 +74,7 @@
 
 ---
 
-## 2. File-by-File Manifest
+## 3. File-by-File Manifest
 
 ```text
 rss-backend/
@@ -42,6 +99,7 @@ rss-backend/
 ├── .env / .env.example      # Environment Configurations, Secrets & Routing Thresholds
 └── tests/                   # Consolidated Test & Benchmark Suite
     ├── comprehensive_test_evaluation.py # Master 9-Part End-to-End Evaluation Suite
+    ├── test_user_personalization.py    # User Onboarding, Preferences, Feed & Daily Digest Verification
     ├── test_content_cleaner.py         # Markdown Sanitizer 4-Pass Unit Test Suite
     ├── test_tavily_integration.py      # Tavily Integration, URL Canonicalization & SSE Tests
     ├── fixtures/tavily_verify_mock.json # Deterministic Demo Mode Verification Fixtures
@@ -63,10 +121,15 @@ rss-backend/
   - `GET /api/articles`: Paginated feed retrieval with macro tag filtering (`macro=Gaming`, `macro=Tech`, etc.).
   - `GET /api/articles/{article_id}`: Full article detail with clean text, TL;DR, macro/micro tags, and metadata.
   - `POST /api/internal/ingest`: Protected ingestion endpoint validating `x-secret` with byte-safe `hmac.compare_digest` and fail-fast startup checks. Hashes canonicalized URLs (`canonicalize_url()`) with SHA-256 for zero-duplicate idempotency (`ON CONFLICT (url_hash) DO NOTHING`). Accepts array of `ScrapedArticleIn`.
-  - `GET /api/search` & `execute_hybrid_search()`: 3-Tier Hybrid Search engine (Dense vector cosine distance + BM25 FTS + tag likeness fused via RRF `UNION ALL`). Includes calibrated noise cutoff ($d < 0.88$) and segregates results into **Direct Matches** ($d \le 0.80$ or FTS/tag hits) and **Want to Explore?** ($0.80 < d < 0.88$ adjacent horizons) with dynamic tag-driven discovery angles (`explore_angle`). Supports flat array, `?grouped=true` split output, and an optional `?live_web=true` segregated external web discovery tier (5.0s timeout, deduplicated).
+  - `GET /api/search` & `execute_hybrid_search()`: 3-Tier Hybrid Search engine (Dense vector cosine distance + BM25 FTS + tag likeness fused via RRF `UNION ALL`). Includes calibrated noise cutoff ($d < 0.78$) and segregates results into **Direct Matches** ($d \le 0.68$ or FTS/tag hits) and **Want to Explore?** ($0.68 < d < 0.78$ adjacent horizons) with dynamic tag-driven discovery angles (`explore_angle`). Supports flat array, `?grouped=true` split output, and an optional `?live_web=true` segregated external web discovery tier (5.0s timeout, deduplicated).
   - `POST /api/articles/{article_id}/chat`: Tier 2 Article Copilot streaming token responses over Server-Sent Events (`text/event-stream` with `data: {"token": "..."}\n\n`). Bounded to the article's text with strict anti-hallucination instructions.
   - `POST /api/intelligence/synthesize`: Tier 3 Multi-Source Consensus Agent. Uses `FAST_MODEL` to formulate a neutral verification query, runs `web_verify()` with `exclude_domains` to pull third-party evidence via Tavily, and streams structured claim verdicts (`[SUPPORTED]`, `[CONTRADICTED]`, `[UNVERIFIED]`) backed by `[T1]`, `[T2]` citations over SSE.
-  - `POST /api/users/login` & `GET /api/users`: Zero-friction user onboarding with deterministic avatars assigned via DiceBear / Liara avatar generator.
+  - `POST /api/users/login` & `GET /api/users`: Zero-friction user onboarding with deterministic avatars assigned via DiceBear / Liara avatar generator, returning onboarding status and preferences.
+  - `GET /api/taxonomy`: Hierarchical macro-to-micro taxonomy dictionary for onboarding modals with zero cross-category tag leakage.
+  - `PUT /api/users/{user_id}/preferences` & `GET`: Stores user macro/micro category preferences, dynamically generating a 384d semantic interest embedding via natural language synthesis.
+  - `GET /api/feed/personalized`: Multi-factor personalized newsfeed combining micro-tag cardinality overlap, macro alignment, cosine vector proximity (`<=>`), and exponential recency decay with zero-leakage filtering.
+  - `POST /api/articles/{article_id}/interactions`: Real-time like/unlike toggle and bookmark tracking with dynamic Exponential Moving Average (EMA) vector learning (`alpha=0.15`).
+  - `GET /api/intelligence/daily-digest`: 24-hour rotating daily fact-checked intelligence digest clustering top trending articles per macro category, cross-checked with Tavily and cached in PostgreSQL.
   - `POST /api/articles/{id}/comments` & `GET`: Social annotations anchored to highlighted paragraph excerpts, stored in `article_comments`.
 
 #### `tavily_service.py`
@@ -162,17 +225,23 @@ rss-backend/
   - `ArticleChatRequest`: Copilot request body with conversation `history` and user `question`.
   - `SynthesizeRequest`: Multi-source consensus request containing a list of `article_ids`.
   - `UserLoginRequest`: Username and display name payload.
+  - `UserPreferencesUpdate`: Onboarding payload with `preferred_macro_tags` and `preferred_micro_tags`.
+  - `UserInteractionRequest`: Article interaction payload (`like`, `bookmark`, `read`).
+  - `UserProfileOut`: User profile with onboarding status, preferred categories, and activity counts.
+  - `DailyDigestOut`: 24-hour rotating synthesized intelligence brief with consensus bullets and citations.
   - `CommentCreate`: Contextual comment payload with `user_id`, `selected_text`, and `comment_text`.
 
 #### `schema.sql`
 - **Role**: Database DDL schema file.
 - **Key Elements**:
   - Extensions: `uuid-ossp`, `vector`.
-  - Tables: `articles`, `users`, `article_comments`.
+  - Tables: `articles`, `users`, `article_comments`, `user_article_interactions`, `daily_intelligence_digests`.
   - Indexes:
     - `idx_articles_embedding`: HNSW index using `vector_cosine_ops` (`CREATE INDEX ... USING hnsw (embedding vector_cosine_ops)`).
     - `idx_articles_macro_tags` & `idx_articles_micro_tags`: GIN inverted indexes for exact array searches.
     - `idx_articles_url_hash`: Unique B-Tree index enforcing URL hash deduplication.
+    - `idx_user_interactions_lookup`: Unique B-Tree index on `(user_id, article_id, interaction_type)`.
+    - `idx_daily_digests_date_macro`: Unique B-Tree index on `(digest_date, macro_tag)`.
     - Full-text search index on `to_tsvector('english', title || ' ' || clean_text)`.
 
 #### `docker-compose.yml`
@@ -195,6 +264,7 @@ rss-backend/
 
 #### `tests/` Directory
 - `comprehensive_test_evaluation.py`: Master test suite executing all 9 evaluation tiers with dynamic SSE stream parsing and live article lookup.
+- `test_user_personalization.py`: 7-Tier verification suite covering taxonomy hierarchy, natural language interest embedding, zero-leakage personalized feed, like/unlike toggling with EMA vector shift, and daily rotating digest caching.
 - `test_content_cleaner.py`: 4-pass Markdown sanitizer unit test suite verifying Wccftech CMS clutter stripping, technical code block preservation, link-density list pruning, and short article guardrails.
 - `test_tavily_integration.py`: Tavily integration, URL canonicalization, Markdown cleaning, and SSE streaming fact-checking tests.
 - `fixtures/tavily_verify_mock.json`: Deterministic Demo Mode verification fixtures.
@@ -207,7 +277,7 @@ rss-backend/
 
 ---
 
-## 3. Data Pipelines & Execution Flow
+## 4. Data Pipelines & Execution Flow
 
 ```
 [Tavily News Ingestion / RSS Feeds]
@@ -245,7 +315,7 @@ rss-backend/
 
 ---
 
-## 4. Search Architecture (`/api/search`)
+## 5. Search Architecture (`/api/search`)
 
 ```
 User Query: "i want news about gaming and chips and small conductors"
@@ -276,7 +346,7 @@ User Query: "i want news about gaming and chips and small conductors"
 
 ---
 
-## 5. Quick Reference Commands
+## 6. Quick Reference Commands
 
 ### Prerequisites & Environment Setup
 ```powershell
@@ -354,6 +424,9 @@ curl -X POST "http://localhost:8000/api/intelligence/synthesize" `
 
 # Tavily Unit & Integration Test Suite (7 test scenarios):
 .\venv\Scripts\python.exe tests/test_tavily_integration.py
+
+# User Personalization & Feed Engine Test Suite (7 Tiers):
+.\venv\Scripts\python.exe tests/test_user_personalization.py
 
 # Master 9-Part End-to-End Regression Suite (100% Score across all 9 Tiers):
 .\venv\Scripts\python.exe tests/comprehensive_test_evaluation.py

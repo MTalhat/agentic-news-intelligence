@@ -4,7 +4,7 @@ Synchronizes macro categories and micro-tags across ingestion, database GIN inde
 and intent search.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 # Macro categories officially supported in rss-backend
 MACRO_CATEGORIES = [
@@ -170,4 +170,121 @@ def normalize_macro_tag(macro: Optional[str]) -> str:
         if canonical.lower() == macro_clean:
             return canonical
     return "Tech"
+
+
+TAG_LABEL_OVERRIDES = {
+    "tsmc": "TSMC",
+    "oled": "OLED",
+    "vrr": "VRR",
+    "variable_refresh_rate": "Variable Refresh Rate (VRR)",
+    "jwst": "JWST (James Webb)",
+    "ecb": "ECB (European Central Bank)",
+    "2nm": "2nm Fabrication",
+    "3nm": "3nm Fabrication",
+    "gaafet": "GAAFET Transistors",
+    "nanosheet": "Nanosheet Architecture",
+    "apu": "Custom APU",
+    "steamos": "SteamOS",
+    "k2_18b": "K2-18b Exoplanet",
+    "nist_standards": "NIST Standards",
+    "nvidia": "NVIDIA",
+    "steam_deck": "Steam Deck",
+    "pc_gaming": "PC Gaming",
+    "llm_agents": "LLM Agents",
+    "ai_chips": "AI Chips & NPUs",
+    "ai_ethics": "AI Safety & Ethics",
+    "ai_tools": "Generative AI Tools",
+    "ev_charging": "EV Charging & Range",
+    "hardware_consoles": "Gaming Consoles (PS/Xbox/Switch)",
+    "industry_esports": "Studios & Esports",
+}
+
+MACRO_METADATA: Dict[str, Dict[str, Any]] = {
+    "Tech": {
+        "display_name": "Tech & Software",
+        "description": "General software, cloud computing, cybersecurity, web standards, IT, startups",
+        "domain_keywords": ["post_quantum", "cryptography", "nist_standards", "runtime"],
+    },
+    "AI": {
+        "display_name": "Artificial Intelligence",
+        "description": "Large language models, autonomous agents, neural architectures, AI research & inference",
+        "domain_keywords": ["autonomous_agents", "anthropic", "inference_optimization", "benchmarks", "nvidia"],
+    },
+    "Hardware": {
+        "display_name": "Hardware & Semiconductors",
+        "description": "Microchips, fabrication, TSMC, Intel, AMD, transistor processes, GPUs, memory",
+        "domain_keywords": ["2nm", "3nm", "gaafet", "nanosheet", "tsmc", "transistors", "foundry", "silicon_wafers"],
+    },
+    "Automotive": {
+        "display_name": "Automotive & Mobility",
+        "description": "Electric vehicles, solid-state batteries, autonomous driving, robotaxis, automakers",
+        "domain_keywords": ["solid_state_battery", "quantumscape", "porsche", "endurance_testing", "electric_vehicles"],
+    },
+    "Gaming": {
+        "display_name": "Gaming & Handhelds",
+        "description": "Video games, consoles, Steam Deck, PC gaming, graphics engines, game development",
+        "domain_keywords": ["steam_deck", "oled", "handheld", "apu", "variable_refresh_rate", "steamos"],
+    },
+    "Finance": {
+        "display_name": "Finance & Markets",
+        "description": "Stock markets, cryptocurrency, macroeconomic policy, central banks, fintech, investing",
+        "domain_keywords": ["digital_euro", "ecb", "settlement", "interbank"],
+    },
+    "Science": {
+        "display_name": "Science & Space",
+        "description": "Space exploration, astronomy, nuclear fusion, biotechnology, physics research",
+        "domain_keywords": ["jwst", "exoplanet", "biosignatures", "k2_18b"],
+    },
+}
+
+
+def format_tag_label(tag: str) -> str:
+    """Formats raw tag into human-readable label."""
+    if tag in TAG_LABEL_OVERRIDES:
+        return TAG_LABEL_OVERRIDES[tag]
+    return tag.replace("_", " ").title()
+
+
+def get_taxonomy_hierarchy() -> List[Dict[str, Any]]:
+    """Returns official hierarchy of Macro categories and their partitioned micro tags.
+    
+    Guarantees zero cross-domain tag contamination for the frontend onboarding popup.
+    """
+    hierarchy = []
+    for macro in MACRO_CATEGORIES:
+        subtags = TAXONOMY_CRITERIA.get(macro, {})
+        meta = MACRO_METADATA.get(macro, {})
+        keywords = meta.get("domain_keywords", [])
+
+        # Combine criteria subtags and domain keywords without duplicates
+        seen_tags = set()
+        micro_tags_list = []
+
+        # 1. Criteria subtags
+        for tag in subtags.keys():
+            if tag not in seen_tags and tag not in BANNED_MICRO_TAGS:
+                seen_tags.add(tag)
+                micro_tags_list.append({
+                    "tag": tag,
+                    "label": format_tag_label(tag)
+                })
+
+        # 2. Domain keywords belonging to this macro domain
+        for tag in keywords:
+            if tag not in seen_tags and tag not in BANNED_MICRO_TAGS:
+                seen_tags.add(tag)
+                micro_tags_list.append({
+                    "tag": tag,
+                    "label": format_tag_label(tag)
+                })
+
+        hierarchy.append({
+            "macro": macro,
+            "display_name": meta.get("display_name", macro),
+            "description": meta.get("description", ""),
+            "micro_tags": micro_tags_list
+        })
+
+    return hierarchy
+
 

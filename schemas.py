@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 class ScrapedArticleIn(BaseModel):
@@ -39,5 +39,32 @@ class UserLoginRequest(BaseModel):
     username: Optional[str] = None
     name: Optional[str] = None
 
+class UserPreferencesUpdate(BaseModel):
+    preferred_macro_tags: List[str] = Field(..., description="List of chosen macro categories")
+    preferred_micro_tags: List[str] = Field(default_factory=list, description="List of chosen micro tags")
+
+class UserInteractionRequest(BaseModel):
+    user_id: str
+    interaction_type: str = Field(default="like", description="'like' or 'bookmark'")
+
+class UserProfileOut(BaseModel):
+    id: str
+    username: str
+    avatar_url: Optional[str] = None
+    onboarding_completed: bool = False
+    preferred_macro_tags: List[str] = Field(default_factory=list)
+    preferred_micro_tags: List[str] = Field(default_factory=list)
+
+class DailyDigestOut(BaseModel):
+    date: str
+    macro_tag: str
+    cluster_title: str
+    article_ids: List[str]
+    articles: List[Dict[str, Any]] = Field(default_factory=list)
+    tavily_sources: List[Dict[str, Any]] = Field(default_factory=list)
+    synthesis_report: str
+    is_cached: bool = False
+
 class SynthesizeRequest(BaseModel):
     article_ids: List[str]
+
