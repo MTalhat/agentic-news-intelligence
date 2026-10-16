@@ -79,30 +79,38 @@
 ```text
 rss-backend/
 ├── main.py                  # Primary FastAPI API Gateway, Search Engine & Streaming Handlers
-├── worker.py                # Asynchronous RSS Ingestion & AI Enrichment Worker
+├── worker.py                # Asynchronous RSS Ingestion & AI Enrichment Worker (SKIP LOCKED)
 ├── classifier.py            # Local Decision SLM (convaiinnovations/laya)
 ├── embedder.py              # Dense Vector Embedding Engine (sentence-transformers/all-MiniLM-L6-v2)
 ├── taxonomy.py              # Domain Taxonomy, Tagging Criteria & Keyword Normalization
 ├── content_cleaner.py       # Generalized 4-Pass Markdown Article Sanitizer & Boilerplate Pruner
-├── tavily_service.py        # Tavily Live Search, Grounded Fact-Checking & TTL Cache
+├── tavily_service.py        # 5-Endpoint Tavily Client (Search, Extract, Map, Crawl, Research) & Telemetry
+├── evidence_verifier.py     # Verifiable Receipts Orchestrator (Span Grounding & Wire Origin Analysis)
+├── site_watcher.py          # RSS-less Newsroom Monitoring Daemon (Tavily Map & Extract)
 ├── ingest_tavily.py         # Autonomous Tavily Ingestion Daemon Across 7 Macro Taxonomy Topics
 ├── url_utils.py             # Canonical URL Normalization & Safe Domain Extraction
 ├── db.py                    # PostgreSQL Connection Pooling (psycopg-pool)
 ├── ai.py                    # OpenAI-Compatible Client (Nebius / LM Studio / OpenRouter)
 ├── schemas.py               # Pydantic V2 Request/Response Data Models
-├── schema.sql               # PostgreSQL DDL, Extensions & Indexes (pgvector, HNSW, GIN)
+├── schema.sql               # PostgreSQL DDL, Extensions & Indexes (pgvector, HNSW, GIN, V1 tables)
+├── migrate_v1_tables.py     # Standalone Idempotent V1 Migration Runner (psycopg)
 ├── docker-compose.yml       # Local PostgreSQL 16 + pgvector Container Config
 ├── migrate_embeddings.py    # Database Migration Script: Embeds Existing Articles
 ├── clean_articles_db.py     # Database Maintenance Script: Batch Cleans Markdown Boilerplate
 ├── reindex_articles.py      # Maintenance Script: Batch Re-enriches & Re-classifies Articles
-├── requirements.txt         # Core Python Runtime Dependencies
+├── requirements.txt         # Core Python Runtime Dependencies (tavily-python>=0.8.5)
 ├── .env / .env.example      # Environment Configurations, Secrets & Routing Thresholds
+├── legacy/                  # Deprecated V0 Prototypes
+│   └── scraping_algorithm.py # Deprecated V0 1,480-line Scraper (Superseded by Tavily)
 └── tests/                   # Consolidated Test & Benchmark Suite
-    ├── comprehensive_test_evaluation.py # Master 9-Part End-to-End Evaluation Suite
-    ├── test_user_personalization.py    # User Onboarding, Preferences, Feed & Daily Digest Verification
+    ├── test_tavily_integration.py      # Tavily 5-Endpoint Integration & Telemetry Test Suite
+    ├── test_evidence_and_origins.py    # Span Grounding & Wire Origin Analysis Test Suite
     ├── test_content_cleaner.py         # Markdown Sanitizer 4-Pass Unit Test Suite
-    ├── test_tavily_integration.py      # Tavily Integration, URL Canonicalization & SSE Tests
+    ├── test_ingestion_and_cleaner.py   # Ingestion, Shingle Dedup & Date Validation Suite
+    ├── test_user_personalization.py    # User Onboarding, Preferences, Feed & Daily Digest Verification
+    ├── comprehensive_test_evaluation.py # Master 9-Part End-to-End Evaluation Suite
     ├── fixtures/tavily_verify_mock.json # Deterministic Demo Mode Verification Fixtures
+    ├── fixtures/test_nvidia_raw.json   # Test Fixture Data
     ├── test_search_speed.py            # Hybrid Vector Search Latency Benchmarks
     ├── test_hybrid_enrichment.py       # SLM Triage vs LLM Latency & Accuracy Verification
     ├── test_copilot_demo.py            # Grounded Streaming Copilot & Guardrail Test

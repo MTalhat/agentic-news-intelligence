@@ -20,7 +20,7 @@ from schemas import (
     SynthesizeRequest, QueryIntentOut, UserLoginRequest,
     UserPreferencesUpdate, UserInteractionRequest, UserProfileOut, DailyDigestOut
 )
-from tavily_service import web_verify, search_news
+from tavily_service import web_verify, search_news, get_tavily_telemetry_stats, tavily_extract
 from url_utils import canonicalize_url, extract_domain
 from content_cleaner import clean_article_markdown
 from taxonomy import (
@@ -83,6 +83,27 @@ def extract_claim_query(title1: str, tldr1: str, title2: str, tldr2: str) -> str
         return cleaned if len(cleaned) > 8 else f"{title1[:50]} {title2[:50]}"
     except Exception:
         return f"{title1[:60]} {title2[:60]}"
+
+def extract_claim_query_single(title: str, tldr: str) -> str:
+    """Uses FAST_MODEL to extract a 6-10 word neutral verification query for a single anchor article."""
+    prompt = (
+        f"Produce a 6 to 10 word neutral search query to independently verify the core factual assertion in this article.\n"
+        f"Keep critical acronyms intact (e.g. AI, EV, TSMC, 2nm, GPU, NPU).\n"
+        f"Article: {title} - {tldr[:150]}\n"
+        f"Respond with ONLY the search query text, no quotes, no preamble."
+    )
+    try:
+        resp = ai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=30,
+            timeout=6.0
+        )
+        cleaned = resp.choices[0].message.content.strip().strip('"').strip("'")
+        return cleaned if len(cleaned) > 8 else title[:60]
+    except Exception:
+        return title[:60]
 
 # 1. Ingestion Endpoint
 @app.post("/api/internal/ingest")
@@ -364,6 +385,7 @@ def execute_hybrid_search(q: str, grouped: bool = False, limit: int = 12):
           AND (macro_tag IS NULL OR macro_tag != 'Off-Topic')
           AND embedding IS NOT NULL
           AND (embedding <=> %(q_vec)s::vector) < 0.78
+        ORDER BY (embedding <=> %(q_vec)s::vector) ASC
         LIMIT 25
     ),
     fts_matches AS (
@@ -376,6 +398,7 @@ def execute_hybrid_search(q: str, grouped: bool = False, limit: int = 12):
         WHERE is_processed = TRUE 
           AND (macro_tag IS NULL OR macro_tag != 'Off-Topic')
           AND to_tsvector('english', title || ' ' || clean_text) @@ websearch_to_tsquery('english', %(q)s)
+        ORDER BY ts_rank_cd(to_tsvector('english', title || ' ' || clean_text), websearch_to_tsquery('english', %(q)s)) DESC
         LIMIT 25
     ),
     tag_matches AS (
@@ -604,8 +627,8 @@ def prepare_synthesis_context(article_ids: List[str]) -> Tuple[List[Dict[str, An
     Validates UUIDs, fetches article content, generates neutral claim verification query,
     executes Tavily web_verify() with exclude_domains, and compiles prompts.
     """
-    if len(article_ids) < 2:
-        raise HTTPException(status_code=400, detail="Provide at least 2 article IDs.")
+    if len(article_ids) < 1:
+        raise HTTPException(status_code=400, detail="Provide at least 1 article ID.")
 
     clean_ids = [validate_uuid(aid, "article_ids") for aid in article_ids]
 
@@ -616,7 +639,7 @@ def prepare_synthesis_context(article_ids: List[str]) -> Tuple[List[Dict[str, An
         """, (clean_ids,))
         rows = cur.fetchall()
 
-    if len(rows) < 2:
+    if len(rows) < 1:
         raise HTTPException(status_code=404, detail="Insufficient articles found for synthesis.")
 
     articles_meta = []
@@ -637,7 +660,11 @@ def prepare_synthesis_context(article_ids: List[str]) -> Tuple[List[Dict[str, An
             "url": url
         })
 
-    verify_query = extract_claim_query(titles[0], tldrs[0], titles[1], tldrs[1])
+    if len(titles) == 1:
+        verify_query = extract_claim_query_single(titles[0], tldrs[0])
+    else:
+        verify_query = extract_claim_query(titles[0], tldrs[0], titles[1], tldrs[1])
+
     ver = web_verify(verify_query, local_urls=tuple(urls))
 
     web_evidence = ver["context_text"] if ver.get("available") else (
@@ -761,62 +788,96 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
                 is_cached=True
             )
 
-    # Step 2: Elastic Clustering Window (48h -> 7d -> All-time)
+    # Step 2: Semantic Story Pairing & Clustering with Single-Anchor Fallback (Safeguard 4)
+    anchor_row = None
     with get_db() as cur:
-        # Window 1: Last 48 hours
+        # 1. Fetch newest anchor article for the macro category
         cur.execute("""
-            SELECT id, title, source_feed, original_url
+            SELECT id, title, source_feed, original_url, embedding
             FROM articles
             WHERE is_processed = TRUE 
               AND macro_tag = %s
               AND (on_topic_score IS NULL OR on_topic_score >= 0.40)
+              AND embedding IS NOT NULL
               AND published_at >= NOW() - INTERVAL '48 hours'
-            ORDER BY published_at DESC LIMIT 2;
+            ORDER BY published_at DESC LIMIT 1;
         """, (target_macro,))
-        candidate_rows = cur.fetchall()
+        anchor_row = cur.fetchone()
 
-        # Window 2: Expand to 7 days
-        if len(candidate_rows) < 2:
+        # Expand window to 7 days if no anchor in 48 hours
+        if not anchor_row:
             cur.execute("""
-                SELECT id, title, source_feed, original_url
+                SELECT id, title, source_feed, original_url, embedding
                 FROM articles
                 WHERE is_processed = TRUE 
                   AND macro_tag = %s
                   AND (on_topic_score IS NULL OR on_topic_score >= 0.40)
+                  AND embedding IS NOT NULL
                   AND published_at >= NOW() - INTERVAL '7 days'
-                ORDER BY published_at DESC LIMIT 2;
+                ORDER BY published_at DESC LIMIT 1;
             """, (target_macro,))
-            candidate_rows = cur.fetchall()
+            anchor_row = cur.fetchone()
 
         # Window 3: Category all-time
-        if len(candidate_rows) < 2:
+        if not anchor_row:
             cur.execute("""
-                SELECT id, title, source_feed, original_url
+                SELECT id, title, source_feed, original_url, embedding
                 FROM articles
                 WHERE is_processed = TRUE 
                   AND macro_tag = %s
                   AND (on_topic_score IS NULL OR on_topic_score >= 0.40)
-                ORDER BY published_at DESC LIMIT 2;
+                  AND embedding IS NOT NULL
+                ORDER BY published_at DESC LIMIT 1;
             """, (target_macro,))
-            candidate_rows = cur.fetchall()
+            anchor_row = cur.fetchone()
 
         # Window 4: Global all-time on-topic fallback
-        if len(candidate_rows) < 2:
+        if not anchor_row:
             cur.execute("""
-                SELECT id, title, source_feed, original_url
+                SELECT id, title, source_feed, original_url, embedding
                 FROM articles
                 WHERE is_processed = TRUE 
                   AND (macro_tag IS NULL OR macro_tag != 'Off-Topic')
                   AND (on_topic_score IS NULL OR on_topic_score >= 0.40)
-                ORDER BY published_at DESC LIMIT 2;
+                  AND embedding IS NOT NULL
+                ORDER BY published_at DESC LIMIT 1;
             """, ())
-            candidate_rows = cur.fetchall()
+            anchor_row = cur.fetchone()
 
-    if len(candidate_rows) < 2:
+    if not anchor_row:
         raise HTTPException(status_code=404, detail="Insufficient articles to generate daily digest.")
 
+    anchor_id, anchor_title, anchor_source, anchor_url, anchor_emb = anchor_row
+    candidate_rows = [(anchor_id, anchor_title, anchor_source, anchor_url)]
+
+    # 2. Search for a genuine sibling article covering the SAME story (cosine distance < 0.42)
+    if anchor_emb is not None:
+        try:
+            with get_db() as cur:
+                cur.execute("""
+                    SELECT id, title, source_feed, original_url, (embedding <=> %s::vector) as dist
+                    FROM articles
+                    WHERE is_processed = TRUE 
+                      AND id != %s
+                      AND macro_tag = %s
+                      AND embedding IS NOT NULL
+                      AND (embedding <=> %s::vector) < 0.42
+                      AND published_at >= NOW() - INTERVAL '7 days'
+                    ORDER BY (embedding <=> %s::vector) ASC
+                    LIMIT 1;
+                """, (anchor_emb, anchor_id, target_macro, anchor_emb, anchor_emb))
+                sibling_row = cur.fetchone()
+                if sibling_row:
+                    candidate_rows.append((sibling_row[0], sibling_row[1], sibling_row[2], sibling_row[3]))
+        except Exception as e:
+            logger.warning("[Daily Digest] Sibling cluster query note: %s", e)
+
     selected_ids = [str(r[0]) for r in candidate_rows]
-    cluster_title = f"{target_macro} Intelligence Consensus: {candidate_rows[0][1][:65]}"
+    if len(candidate_rows) >= 2:
+        cluster_title = f"{target_macro} Intelligence Consensus: {candidate_rows[0][1][:65]}"
+    else:
+        # Safeguard 4: Graceful single-anchor deep verification fallback
+        cluster_title = f"{target_macro} Deep Verification Brief: {candidate_rows[0][1][:65]}"
 
     # Execute decoupled synthesis
     articles_meta, ver, system_msg, user_prompt = prepare_synthesis_context(selected_ids)
@@ -864,6 +925,55 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
         synthesis_report=synthesis_markdown,
         is_cached=False
     )
+
+
+# 8.1 Live Tavily Operational Telemetry & Usage Stats
+@app.get("/api/tavily/stats")
+def get_tavily_stats():
+    """
+    Returns live Tavily telemetry metrics across all operations:
+    total calls, endpoint breakdown (search, extract, map, crawl, research),
+    purpose distribution, average latency, and estimated credit savings via cache.
+    """
+    return get_tavily_telemetry_stats()
+
+
+# 8.2 Verifiable Structured Evidence Cards ("Receipts")
+@app.get("/api/clusters/{cluster_id}/evidence")
+def get_cluster_evidence(cluster_id: str):
+    """
+    Retrieves the structured evidence card for a story cluster, including atomic claims,
+    grounded quote spans, wire origin analysis (Reuters/AP syndication detection), and verdicts.
+    """
+    valid_id = validate_uuid(cluster_id, "cluster_id")
+    with get_db() as cur:
+        cur.execute("""
+            SELECT claims, summary_verdict, independent_origins, total_sources, raw_evidence_citations, created_at
+            FROM evidence_cards
+            WHERE cluster_id = %s;
+        """, (valid_id,))
+        row = cur.fetchone()
+        if not row:
+            # If evidence card hasn't been precomputed, attempt on-demand verification
+            cur.execute("SELECT article_ids FROM story_clusters WHERE id = %s;", (valid_id,))
+            sc_row = cur.fetchone()
+            if sc_row and sc_row[0]:
+                cur.execute("SELECT id, title, tldr, clean_text, original_url FROM articles WHERE id = ANY(%s::uuid[]);", (sc_row[0],))
+                arts = [{"id": str(r[0]), "title": r[1], "tldr": r[2], "text": r[3], "url": r[4]} for r in cur.fetchall()]
+                if arts:
+                    from evidence_verifier import verify_cluster_evidence
+                    return verify_cluster_evidence(arts, cluster_id=valid_id)
+            raise HTTPException(status_code=404, detail="Evidence card not found for this cluster.")
+
+        return {
+            "cluster_id": valid_id,
+            "claims": row[0],
+            "summary_verdict": row[1],
+            "independent_origins_count": row[2],
+            "total_sources": row[3],
+            "raw_evidence_citations": row[4],
+            "computed_at": row[5].isoformat() if hasattr(row[5], "isoformat") else str(row[5])
+        }
 
 
 # 9. Social Annotations & Comments

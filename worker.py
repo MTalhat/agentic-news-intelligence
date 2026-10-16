@@ -191,7 +191,8 @@ def process_batch() -> bool:
             FROM articles 
             WHERE is_processed = FALSE 
             ORDER BY created_at ASC 
-            LIMIT 5;
+            LIMIT 5
+            FOR UPDATE SKIP LOCKED;
         """)
         batch = cur.fetchall()
 

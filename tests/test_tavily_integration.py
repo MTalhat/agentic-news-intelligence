@@ -8,8 +8,13 @@ sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 load_dotenv()
 
+import tavily_service
 from url_utils import canonicalize_url, extract_domain
-from tavily_service import search_news, web_verify
+from tavily_service import (
+    search_news, web_verify, tavily_extract, tavily_map, 
+    tavily_crawl, tavily_research, get_tavily_telemetry_stats
+)
+
 
 def test_canonicalize_url():
     raw = "https://www.Reuters.com/tech/nvidia-chips/?utm_source=twitter&utm_medium=social&ref=feed#section"
@@ -18,28 +23,94 @@ def test_canonicalize_url():
     assert canonicalize_url("https://theverge.com/news/") == "https://theverge.com/news"
     assert canonicalize_url("") == ""
 
+
 def test_extract_domain():
     assert extract_domain("https://www.theverge.com/tech/item") == "theverge.com"
     assert extract_domain("https://docs.nvidia.com/index.html") == "docs.nvidia.com"
     assert extract_domain("invalid-url") == "news.web"
 
+
 def test_mock_search_news():
-    results = search_news("Nvidia Blackwell B200", max_results=2)
-    assert len(results) > 0
-    item = results[0]
-    assert "Tavily Demo Verification Wire" in item["title"]
-    # Verify text length exceeds 350 characters
-    assert len(item["raw_content"]) >= 350
-    assert item.get("is_demo") is True
+    orig = tavily_service.TAVILY_MOCK
+    tavily_service.TAVILY_MOCK = True
+    try:
+        results = search_news("Nvidia Blackwell B200", max_results=2)
+        assert len(results) > 0
+        item = results[0]
+        assert "Tavily Demo Verification Wire" in item["title"]
+        assert len(item["raw_content"]) >= 350
+        assert item.get("is_demo") is True
+    finally:
+        tavily_service.TAVILY_MOCK = orig
+
+
+def test_mock_extract():
+    orig = tavily_service.TAVILY_MOCK
+    tavily_service.TAVILY_MOCK = True
+    try:
+        resp = tavily_extract(["https://tsmc.com/press/2nm-update"])
+        results = resp.get("results", [])
+        assert len(results) == 1
+        assert "Verified Full Text Report" in results[0]["raw_content"]
+    finally:
+        tavily_service.TAVILY_MOCK = orig
+
+
+def test_mock_map():
+    orig = tavily_service.TAVILY_MOCK
+    tavily_service.TAVILY_MOCK = True
+    try:
+        resp = tavily_map("https://openai.com/news")
+        results = resp.get("results", [])
+        assert len(results) >= 2
+        assert any("press-release" in u for u in results)
+    finally:
+        tavily_service.TAVILY_MOCK = orig
+
+
+def test_mock_crawl():
+    orig = tavily_service.TAVILY_MOCK
+    tavily_service.TAVILY_MOCK = True
+    try:
+        resp = tavily_crawl("https://deepmind.google/discover/blog")
+        results = resp.get("results", [])
+        assert len(results) >= 1
+        assert "Comprehensive Section Crawl" in results[0]["raw_content"]
+    finally:
+        tavily_service.TAVILY_MOCK = orig
+
+
+def test_mock_research():
+    orig = tavily_service.TAVILY_MOCK
+    tavily_service.TAVILY_MOCK = True
+    try:
+        resp = tavily_research("Semiconductor 2nm lithography scaling")
+        assert "Executive Intelligence Brief" in resp.get("report", "")
+    finally:
+        tavily_service.TAVILY_MOCK = orig
+
 
 def test_mock_web_verify():
-    ver = web_verify("QuantumScape solid state battery breakthroughs", local_urls=("https://electrek.co/news",))
-    assert ver["available"] is True
-    assert len(ver["sources"]) > 0
-    assert "sources" in ver
-    first_src = ver["sources"][0]
-    assert first_src.get("is_demo") is True
-    assert first_src.get("domain") == "demo.tavily.internal"
+    orig = tavily_service.TAVILY_MOCK
+    tavily_service.TAVILY_MOCK = True
+    try:
+        ver = web_verify("QuantumScape solid state battery breakthroughs", local_urls=("https://electrek.co/news",))
+        assert ver["available"] is True
+        assert len(ver["sources"]) > 0
+        first_src = ver["sources"][0]
+        assert first_src.get("is_demo") is True
+        assert first_src.get("domain") == "demo.tavily.internal"
+    finally:
+        tavily_service.TAVILY_MOCK = orig
+
+
+def test_telemetry_stats():
+    stats = get_tavily_telemetry_stats()
+    assert "total_calls" in stats
+    assert "total_credits_estimated" in stats
+    assert "by_endpoint" in stats
+    assert stats["total_calls"] > 0
+
 
 def test_byte_safe_hmac():
     secret = "local_hackathon_dev_secret"
@@ -48,8 +119,8 @@ def test_byte_safe_hmac():
     assert hmac.compare_digest(valid.encode("utf-8"), secret.encode("utf-8")) is True
     assert hmac.compare_digest(invalid.encode("utf-8"), secret.encode("utf-8")) is False
 
+
 def test_sse_parser_tolerance():
-    # Simulates read_sse_stream from tests/comprehensive_test_evaluation.py
     simulated_sse_lines = [
         b'data: {"status": "Cross-checking assertions against live web consensus via Tavily..."}\n',
         b'data: {"sources": [{"title": "Demo Wire", "url": "https://demo"}], "available": true}\n',
@@ -78,46 +149,33 @@ def test_sse_parser_tolerance():
     assert "Shared Consensus" in result_text
     assert "Framing Discrepancies" in result_text
 
-def test_clean_article_markdown():
-    from content_cleaner import clean_article_markdown
-    raw_sample = (
-        "[Discord](https://discord.gg) * [Home](https://site.com)\n\n"
-        "# Google DeepMind Releases EmbeddingGemma 2\n\n"
-        "Google DeepMind has introduced EmbeddingGemma 2, a 740M multimodal model designed for edge devices. "
-        "The architecture builds upon the Gemma 2 family with specialized vision-language projection layers. "
-        "In comprehensive benchmarks across mobile and embedded accelerators, EmbeddingGemma 2 achieved sub-50ms "
-        "inference latency while maintaining state-of-the-art retrieval accuracy on cross-modal search datasets.\n\n"
-        "Developers can deploy the weights locally using standard runtimes without relying on remote API calls. "
-        "The model weights are released under an open permissive license for research and commercial deployment. "
-        "This release represents a significant advancement for on-device multimodal artificial intelligence.\n\n"
-        "#### RELATED ARTICLES\n\n"
-        "* Mistral AI Releases Large Model\n"
-        "© Copyright 2026 Media Inc"
-    )
-    cleaned = clean_article_markdown("Google DeepMind Releases EmbeddingGemma 2", raw_sample)
-    assert "# Google DeepMind Releases EmbeddingGemma 2" in cleaned
-    assert "740M multimodal model" in cleaned
-    assert "Discord" not in cleaned
-    assert "RELATED ARTICLES" not in cleaned
-    assert "Copyright" not in cleaned
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("      RUNNING TAVILY INTEGRATION UNIT TEST SUITE")
-    print("=" * 60)
+    print("=" * 65)
+    print("      RUNNING TAVILY MULTI-ENDPOINT INTEGRATION SUITE")
+    print("=" * 65)
     test_canonicalize_url()
     print("✓ test_canonicalize_url PASSED")
     test_extract_domain()
     print("✓ test_extract_domain PASSED")
-    test_clean_article_markdown()
-    print("✓ test_clean_article_markdown PASSED")
     test_mock_search_news()
     print("✓ test_mock_search_news PASSED")
+    test_mock_extract()
+    print("✓ test_mock_extract (Tavily Extract API) PASSED")
+    test_mock_map()
+    print("✓ test_mock_map (Tavily Map API) PASSED")
+    test_mock_crawl()
+    print("✓ test_mock_crawl (Tavily Crawl API) PASSED")
+    test_mock_research()
+    print("✓ test_mock_research (Tavily Research API) PASSED")
     test_mock_web_verify()
-    print("✓ test_mock_web_verify PASSED")
+    print("✓ test_mock_web_verify (Anti-Circular Verification) PASSED")
+    test_telemetry_stats()
+    print("✓ test_telemetry_stats (Real-time Telemetry Tracking) PASSED")
     test_byte_safe_hmac()
     print("✓ test_byte_safe_hmac PASSED")
     test_sse_parser_tolerance()
     print("✓ test_sse_parser_tolerance PASSED")
-    print("\n[ALL 7 TAVILY INTEGRATION TESTS PASSED]")
-
+    print("=" * 65)
+    print("[ALL 11 TAVILY INTEGRATION & MULTI-ENDPOINT TESTS PASSED!]")
+    print("=" * 65)

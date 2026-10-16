@@ -10,4 +10,4 @@ requests>=2.31.0
 torch>=2.2.0
 sentence-transformers>=2.6.0
 laya>=0.4.2
-tavily-python>=0.3.3
+tavily-python>=0.8.5

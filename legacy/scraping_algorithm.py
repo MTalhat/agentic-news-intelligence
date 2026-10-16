@@ -1,3 +1,15 @@
+"""
+LEGACY ARCHITECTURE NOTE (V0 PROTOTYPE - DEPRECATED):
+-----------------------------------------------------
+This 1,480-line module was FeedProof's V0 prototype attempting multi-source web scraping 
+via DuckDuckGo, Yahoo RSS, Google News, and Reddit. 
+
+In production testing, brittle DOM scrapers suffered from >60% yield loss, anti-bot 
+challenges, and CDN rate-limits. For V1 (Nebius x NVIDIA Hackathon), this entire brittle 
+layer was deprecated and replaced with the unified Tavily Intelligence Stack (Search, 
+Extract, Map, Crawl, Research).
+"""
+
 import time
 import urllib.parse
 import re

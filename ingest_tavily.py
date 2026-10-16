@@ -12,7 +12,7 @@ from typing import Any, Optional
 import requests
 from dotenv import load_dotenv
 
-from tavily_service import search_news
+from tavily_service import search_news, tavily_extract
 from url_utils import canonicalize_url, extract_domain
 from content_cleaner import clean_article_markdown, extract_normalized_shingles
 
@@ -250,7 +250,14 @@ def harvest_and_ingest(
                 # Clean content through hardened Markdown pipeline
                 text = clean_article_markdown(title, raw_text)
                 if not text or len(text) < 250:
-                    continue
+                    # Tavily Extract Fallback for paywalls or JS-heavy sites
+                    extract_res = tavily_extract(clean_url, purpose="ingest_extract_fallback")
+                    for ep in extract_res.get("results", []):
+                        if ep.get("raw_content"):
+                            text = clean_article_markdown(title, ep["raw_content"])
+                            break
+                    if not text or len(text) < 250:
+                        continue
 
                 # Layer 2: Content Hash Deduplication (SHA-256)
                 content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
