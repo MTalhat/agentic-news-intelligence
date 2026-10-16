@@ -161,6 +161,33 @@ def _truncate_markdown_safely(text: str, max_chars: int = 25000) -> str:
     return sliced
 
 
+def get_personalized_search_queries(max_queries: int = 2) -> list[tuple[str, str]]:
+    """
+    Synthesizes dynamic search queries from active user interest tags and preferences.
+    Ensures Tavily autonomous harvesting actively adapts to user behavior in addition to static taxonomy.
+    """
+    queries = []
+    try:
+        from db import pool
+        with pool.connection(timeout=0.5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT unnest(preferred_micro_tags) AS tag 
+                    FROM users 
+                    WHERE preferred_micro_tags IS NOT NULL AND cardinality(preferred_micro_tags) > 0
+                    LIMIT 6;
+                """)
+                rows = cur.fetchall()
+                tags = [r[0].replace("_", " ") for r in rows if r[0]]
+                if tags:
+                    for i in range(0, min(len(tags), max_queries * 2), 2):
+                        chunk = tags[i:i+2]
+                        queries.append((" ".join(chunk) + " breaking innovations news", "news"))
+    except Exception as e:
+        logger.info("[Ingest] Personalized query synthesis note: %s", e)
+    return queries
+
+
 def harvest_and_ingest(
     max_per_topic: int = 4, 
     target_total: int = 0, 
@@ -199,7 +226,14 @@ def harvest_and_ingest(
         target_total or "N/A"
     )
 
-    for category, query_tuples in TAXONOMY_QUERIES.items():
+    # Dynamic Personalization Loop: Synthesize queries from active user preferences
+    query_schedule = dict(TAXONOMY_QUERIES)
+    personalized_queries = get_personalized_search_queries(max_queries=2)
+    if personalized_queries:
+        logger.info("[Ingest] Injected %d personalized user interest queries into harvest cycle.", len(personalized_queries))
+        query_schedule["Personalized"] = personalized_queries
+
+    for category, query_tuples in query_schedule.items():
         if abort_all:
             break
 
@@ -207,7 +241,7 @@ def harvest_and_ingest(
         category_inserted = 0
 
         # Determine which queries to run for this category
-        if all_queries:
+        if all_queries or category == "Personalized":
             selected_queries = query_tuples
         else:
             selected_query = query_tuples[cycle_index % len(query_tuples)]
@@ -223,7 +257,8 @@ def harvest_and_ingest(
                     time_range=time_range,
                     search_topic=search_topic,
                     include_raw_content="markdown",
-                    timeout=18.0
+                    timeout=18.0,
+                    purpose="personalized_ingestion" if category == "Personalized" else "ingestion"
                 )
             except Exception as e:
                 logger.error("[Search Error] Tavily search failed for '%s': %s", query[:30], e)

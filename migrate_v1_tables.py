@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS evidence_cards (
     tavily_telemetry JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- 5. Articles Worker Reliability & Error Tracking
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS error_message TEXT;
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS retry_count INT DEFAULT 0;
 """
 
 def run_migration() -> bool:

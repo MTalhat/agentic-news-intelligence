@@ -44,7 +44,7 @@ def get_classifier():
     return _classifier
 
 def init_db_schema():
-    """Ensure optional observability and vector columns exist in the articles table."""
+    """Ensure optional observability, error tracking, and vector columns exist in the articles table."""
     try:
         with get_db() as cur:
             cur.execute("""
@@ -52,11 +52,13 @@ def init_db_schema():
                 ADD COLUMN IF NOT EXISTS confidence_score FLOAT,
                 ADD COLUMN IF NOT EXISTS on_topic_score FLOAT,
                 ADD COLUMN IF NOT EXISTS macro_tags TEXT[],
-                ADD COLUMN IF NOT EXISTS embedding vector(384);
+                ADD COLUMN IF NOT EXISTS embedding vector(384),
+                ADD COLUMN IF NOT EXISTS error_message TEXT,
+                ADD COLUMN IF NOT EXISTS retry_count INT DEFAULT 0;
                 CREATE INDEX IF NOT EXISTS idx_articles_macro_tags ON articles USING GIN (macro_tags);
                 CREATE INDEX IF NOT EXISTS idx_articles_embedding ON articles USING hnsw (embedding vector_cosine_ops);
             """)
-        logger.info("Database schema columns verified (confidence_score, on_topic_score, macro_tags, embedding).")
+        logger.info("Database schema columns verified (confidence_score, on_topic_score, macro_tags, embedding, error_message, retry_count).")
     except Exception as e:
         logger.warning("Could not verify DB columns: %s", e)
 
@@ -187,9 +189,10 @@ def save_article_enrichment(art_id: str, macro: str, macro_tags: list, micro: li
 def process_batch() -> bool:
     with get_db() as cur:
         cur.execute("""
-            SELECT id, title, clean_text 
+            SELECT id, title, clean_text, COALESCE(retry_count, 0)
             FROM articles 
             WHERE is_processed = FALSE 
+              AND (retry_count IS NULL OR retry_count < 3)
             ORDER BY created_at ASC 
             LIMIT 5
             FOR UPDATE SKIP LOCKED;
@@ -202,7 +205,7 @@ def process_batch() -> bool:
     classifier = get_classifier()
     has_classifier = classifier is not None and classifier.is_available()
 
-    for art_id, title, text in batch:
+    for art_id, title, text, r_count in batch:
         try:
             # Defensive cleaning to strip tail widgets before Laya triage & embedding
             cleaned_body, _ = clean_markdown_article(text or "")
@@ -257,11 +260,19 @@ def process_batch() -> bool:
             save_article_enrichment(art_id, macro=macro, macro_tags=[macro], micro=micro, tldr=tldr, title=title)
             logger.info("[Worker Legacy Enriched] %s -> %s / %s", title[:30], macro, micro)
 
-
         except Exception as e:
-            logger.error("[Worker Error] %s: %s", art_id, e)
+            err_msg = str(e)[:450]
+            current_retries = (r_count or 0) + 1
+            give_up = current_retries >= 3
+            logger.error("[Worker Error] Article %s (attempt %d/3): %s", art_id, current_retries, err_msg)
             with get_db() as cur:
-                cur.execute("UPDATE articles SET is_processed = TRUE WHERE id = %s;", (art_id,))
+                cur.execute("""
+                    UPDATE articles 
+                    SET retry_count = %s,
+                        error_message = %s,
+                        is_processed = %s
+                    WHERE id = %s;
+                """, (current_retries, err_msg, give_up, art_id))
     
     return True
 
