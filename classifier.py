@@ -52,7 +52,7 @@ class LayaClassifier:
         return cls._instance
 
     def __init__(self):
-        self.conf_threshold = float(os.getenv("LAYA_CONFIDENCE_THRESHOLD", "0.40"))
+        self.conf_threshold = float(os.getenv("LAYA_CONFIDENCE_THRESHOLD", "0.65"))
         self.on_topic_threshold = float(os.getenv("LAYA_ON_TOPIC_THRESHOLD", "0.40"))
         self.model_name = os.getenv("LAYA_MODEL_NAME", "convaiinnovations/laya")
 

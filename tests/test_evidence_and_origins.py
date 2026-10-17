@@ -6,7 +6,11 @@ sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 load_dotenv()
 
-from evidence_verifier import span_is_grounded, assign_origins, verify_cluster_evidence
+from datetime import datetime, timezone
+from evidence_verifier import (
+    span_is_grounded, assign_origins, verify_cluster_evidence,
+    _classify_sentence_stance, _is_fresh_cluster
+)
 import tavily_service
 
 
@@ -85,6 +89,32 @@ def test_evidence_verifier_mock_pipeline():
         tavily_service.TAVILY_MOCK = orig
 
 
+def test_negation_aware_stance_classification():
+    claim = "TSMC 2nm volume production begins on schedule"
+    # Double negation / benign negation should be classified as 'support', not 'contradict'
+    s_benign = "Independent testing across three laboratory baselines corroborates TSMC 2nm specifications without discrepancies"
+    assert _classify_sentence_stance(s_benign, claim, "TSMC") == "support"
+
+    s_rumor = "TSMC engineers confirmed that rumors of 2nm delay were false"
+    assert _classify_sentence_stance(s_rumor, claim, "TSMC") == "support"
+
+    # Direct refutation should be 'contradict'
+    s_contra = "TSMC officially denied reports that 2nm volume production begins this quarter"
+    assert _classify_sentence_stance(s_contra, claim, "TSMC") == "contradict"
+
+
+def test_fresh_story_rule():
+    fresh_articles = [{
+        "id": "22222222-2222-2222-2222-222222222222",
+        "title": "Breaking: Startup unveils experimental photonic chip prototype",
+        "tldr": "A stealth startup unveiled an experimental photonic chip prototype minutes ago.",
+        "text": "The company announced the prototype in a brief blog post today.",
+        "url": "https://stealth-photonics.example.com/launch",
+        "published_at": datetime.now(timezone.utc).isoformat()
+    }]
+    assert _is_fresh_cluster(fresh_articles, max_hours=6.0) is True
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print("    RUNNING EVIDENCE VERIFIER & ORIGINS TEST SUITE")
@@ -97,6 +127,10 @@ if __name__ == "__main__":
     print("✓ test_wire_origin_syndication_detection PASSED")
     test_evidence_verifier_mock_pipeline()
     print("✓ test_evidence_verifier_mock_pipeline PASSED")
+    test_negation_aware_stance_classification()
+    print("✓ test_negation_aware_stance_classification PASSED")
+    test_fresh_story_rule()
+    print("✓ test_fresh_story_rule PASSED")
     print("=" * 65)
-    print("[ALL 4 EVIDENCE & ORIGIN TESTS PASSED!]")
+    print("[ALL 6 EVIDENCE & ORIGIN TESTS PASSED!]")
     print("=" * 65)

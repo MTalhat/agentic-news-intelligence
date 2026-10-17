@@ -59,6 +59,7 @@ class DailyDigestOut(BaseModel):
     date: str
     macro_tag: str
     cluster_title: str
+    cluster_id: Optional[str] = None
     article_ids: List[str]
     articles: List[Dict[str, Any]] = Field(default_factory=list)
     tavily_sources: List[Dict[str, Any]] = Field(default_factory=list)
@@ -67,4 +68,11 @@ class DailyDigestOut(BaseModel):
 
 class SynthesizeRequest(BaseModel):
     article_ids: List[str]
+
+class DeepResearchRequest(BaseModel):
+    query: str = Field(..., min_length=3, description="Investigative topic or claim to research via Tavily")
+    model: str = Field(default="mini", description="'mini' or 'pro'")
+
+class SiteWatchTriggerRequest(BaseModel):
+    max_extract_per_site: int = Field(default=2, ge=1, le=5)
 

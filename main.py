@@ -4,7 +4,7 @@ import hmac
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
 import numpy as np
 from dateutil import parser as date_parser
@@ -18,9 +18,13 @@ from embedder import get_embedder
 from schemas import (
     ScrapedArticleIn, ArticleChatRequest, CommentCreate, 
     SynthesizeRequest, QueryIntentOut, UserLoginRequest,
-    UserPreferencesUpdate, UserInteractionRequest, UserProfileOut, DailyDigestOut
+    UserPreferencesUpdate, UserInteractionRequest, UserProfileOut, DailyDigestOut,
+    DeepResearchRequest, SiteWatchTriggerRequest
 )
-from tavily_service import web_verify, search_news, get_tavily_telemetry_stats, tavily_extract
+from tavily_service import (
+    web_verify, search_news, get_tavily_telemetry_stats, tavily_extract, tavily_research
+)
+from evidence_verifier import assign_origins, verify_cluster_evidence
 from url_utils import canonicalize_url, extract_domain
 from content_cleaner import clean_article_markdown
 from taxonomy import (
@@ -117,9 +121,11 @@ def ingest_articles(items: list[ScrapedArticleIn], x_secret: str = Header(...)):
             canonical_link = canonicalize_url(item.Link)
             url_hash = hashlib.sha256(canonical_link.encode("utf-8")).hexdigest()
             try:
-                pub_date = date_parser.parse(item.Tarih) if item.Tarih else datetime.utcnow()
+                pub_date = date_parser.parse(item.Tarih) if item.Tarih else datetime.now(timezone.utc)
+                if pub_date.tzinfo is None:
+                    pub_date = pub_date.replace(tzinfo=timezone.utc)
             except Exception:
-                pub_date = datetime.utcnow()
+                pub_date = datetime.now(timezone.utc)
 
             cleaned_content = clean_article_markdown(item.Baslik, item.TamMetin)
 
@@ -620,12 +626,52 @@ def chat_with_article(article_id: str, req: ArticleChatRequest):
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
     )
 
-# 6. Decoupled Core Synthesis Helper
+# 6. Deterministic Story Cluster Upsert & Decoupled Synthesis Helper
+def _compute_deterministic_cluster_id(article_ids: List[str]) -> str:
+    """Generates a deterministic UUIDv5 from sorted article UUIDs so identical pairs resolve to the same cluster_id."""
+    sorted_key = ",".join(sorted(str(x).strip().lower() for x in article_ids))
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, sorted_key))
+
+
+def _upsert_story_cluster(
+    article_ids: List[str],
+    articles_for_origins: List[Dict[str, Any]],
+    macro_tag: str = "Tech",
+    cluster_title: str = "Intelligence Story Cluster"
+) -> str:
+    """Persists or updates a semantic story cluster in story_clusters using deterministic UUIDv5 primary key."""
+    cluster_id = _compute_deterministic_cluster_id(article_ids)
+    origin_info = assign_origins(articles_for_origins)
+    try:
+        with get_db() as cur:
+            cur.execute("""
+                INSERT INTO story_clusters 
+                    (id, macro_tag, cluster_title, article_ids, independent_origins_count, origin_breakdown, updated_at)
+                VALUES (%s, %s, %s, %s::uuid[], %s, %s::jsonb, NOW())
+                ON CONFLICT (id) DO UPDATE
+                SET cluster_title = EXCLUDED.cluster_title,
+                    article_ids = EXCLUDED.article_ids,
+                    independent_origins_count = EXCLUDED.independent_origins_count,
+                    origin_breakdown = EXCLUDED.origin_breakdown,
+                    updated_at = NOW();
+            """, (
+                cluster_id,
+                macro_tag or "Tech",
+                cluster_title,
+                article_ids,
+                origin_info.get("independent_origins_count", 1),
+                json.dumps(origin_info.get("origins", []))
+            ))
+    except Exception as e:
+        logger.warning("[Cluster Upsert] Could not persist story_cluster %s: %s", cluster_id, e)
+    return cluster_id
+
+
 def prepare_synthesis_context(article_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, str], str]:
     """
     Decoupled core synthesis pipeline:
-    Validates UUIDs, fetches article content, generates neutral claim verification query,
-    executes Tavily web_verify() with exclude_domains, and compiles prompts.
+    Validates UUIDs, fetches article content, upserts deterministic story_cluster,
+    generates neutral claim verification query, executes Tavily web_verify() with exclude_domains, and compiles prompts.
     """
     if len(article_ids) < 1:
         raise HTTPException(status_code=400, detail="Provide at least 1 article ID.")
@@ -634,7 +680,7 @@ def prepare_synthesis_context(article_ids: List[str]) -> Tuple[List[Dict[str, An
 
     with get_db() as cur:
         cur.execute("""
-            SELECT id, source_feed, title, tldr, clean_text, original_url 
+            SELECT id, source_feed, title, tldr, clean_text, original_url, macro_tag, published_at 
             FROM articles WHERE id = ANY(%s::uuid[]);
         """, (clean_ids,))
         rows = cur.fetchall()
@@ -643,11 +689,15 @@ def prepare_synthesis_context(article_ids: List[str]) -> Tuple[List[Dict[str, An
         raise HTTPException(status_code=404, detail="Insufficient articles found for synthesis.")
 
     articles_meta = []
+    origin_docs = []
     blocks = ""
     titles = []
     tldrs = []
     urls = []
-    for idx, (art_id, source, title, tldr, text, url) in enumerate(rows):
+    primary_macro = "Tech"
+    for idx, (art_id, source, title, tldr, text, url, m_tag, pub_at) in enumerate(rows):
+        if idx == 0 and m_tag:
+            primary_macro = m_tag
         titles.append(title)
         tldrs.append(tldr or "")
         urls.append(url)
@@ -659,13 +709,30 @@ def prepare_synthesis_context(article_ids: List[str]) -> Tuple[List[Dict[str, An
             "tldr": tldr,
             "url": url
         })
+        origin_docs.append({
+            "id": str(art_id),
+            "title": title,
+            "tldr": tldr or "",
+            "text": text or "",
+            "url": url,
+            "published_at": pub_at
+        })
+
+    cluster_title = f"{primary_macro} Synthesis: {titles[0][:65]}"
+    cluster_id = _upsert_story_cluster(
+        article_ids=[a["id"] for a in articles_meta],
+        articles_for_origins=origin_docs,
+        macro_tag=primary_macro,
+        cluster_title=cluster_title
+    )
 
     if len(titles) == 1:
         verify_query = extract_claim_query_single(titles[0], tldrs[0])
     else:
         verify_query = extract_claim_query(titles[0], tldrs[0], titles[1], tldrs[1])
 
-    ver = web_verify(verify_query, local_urls=tuple(urls))
+    ver = dict(web_verify(verify_query, local_urls=tuple(urls), cluster_id=cluster_id))
+    ver["cluster_id"] = cluster_id
 
     web_evidence = ver["context_text"] if ver.get("available") else (
         "LIVE EXTERNAL VERIFICATION UNAVAILABLE. "
@@ -701,7 +768,7 @@ def synthesize_sources(req: SynthesizeRequest):
     def stream_synthesis():
         try:
             yield f"data: {json.dumps({'status': 'Cross-checking assertions against live web consensus via Tavily...'})}\n\n"
-            yield f"data: {json.dumps({'sources': ver.get('sources', []), 'available': ver.get('available', False)})}\n\n"
+            yield f"data: {json.dumps({'sources': ver.get('sources', []), 'available': ver.get('available', False), 'cluster_id': ver.get('cluster_id')})}\n\n"
 
             stream = ai_client.chat.completions.create(
                 model=REASONING_MODEL,
@@ -750,7 +817,7 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
     if not target_macro:
         target_macro = "Gaming"
 
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # Step 1: Check PostgreSQL daily cache for today's digest
     with get_db() as cur:
@@ -764,7 +831,7 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
         if cached_row:
             d_date, m_tag, c_title, art_ids, tavily_json, synth_md = cached_row
             cur.execute("""
-                SELECT id, source_feed, title, original_url, author, published_at, macro_tag, tldr
+                SELECT id, source_feed, title, original_url, author, published_at, macro_tag, tldr, clean_text
                 FROM articles WHERE id = ANY(%s::uuid[]);
             """, (art_ids,))
             art_rows = cur.fetchall()
@@ -776,12 +843,27 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
                 }
                 for ar in art_rows
             ]
+            origin_docs = [
+                {
+                    "id": str(ar[0]), "title": ar[2], "tldr": ar[7] or "",
+                    "text": ar[8] or "", "url": ar[3], "published_at": ar[5]
+                }
+                for ar in art_rows
+            ]
+            str_art_ids = [str(aid) for aid in art_ids]
+            det_cluster_id = _upsert_story_cluster(
+                article_ids=str_art_ids,
+                articles_for_origins=origin_docs,
+                macro_tag=m_tag,
+                cluster_title=c_title
+            )
             tavily_sources = (tavily_json or {}).get("sources", [])
             return DailyDigestOut(
                 date=str(d_date),
                 macro_tag=m_tag,
                 cluster_title=c_title,
-                article_ids=[str(aid) for aid in art_ids],
+                cluster_id=det_cluster_id,
+                article_ids=str_art_ids,
                 articles=arts_list,
                 tavily_sources=tavily_sources,
                 synthesis_report=synth_md,
@@ -879,8 +961,9 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
         # Safeguard 4: Graceful single-anchor deep verification fallback
         cluster_title = f"{target_macro} Deep Verification Brief: {candidate_rows[0][1][:65]}"
 
-    # Execute decoupled synthesis
+    # Execute decoupled synthesis (which also upserts deterministic story_cluster)
     articles_meta, ver, system_msg, user_prompt = prepare_synthesis_context(selected_ids)
+    det_cluster_id = ver.get("cluster_id") or _compute_deterministic_cluster_id(selected_ids)
 
     # Non-streaming LLM call for persistent digest
     try:
@@ -911,7 +994,7 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
             target_macro, 
             cluster_title, 
             selected_ids, 
-            json.dumps({"sources": ver.get("sources", []), "available": ver.get("available", False)}), 
+            json.dumps({"sources": ver.get("sources", []), "available": ver.get("available", False), "cluster_id": det_cluster_id}), 
             synthesis_markdown
         ))
 
@@ -919,6 +1002,7 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
         date=today_str,
         macro_tag=target_macro,
         cluster_title=cluster_title,
+        cluster_id=det_cluster_id,
         article_ids=selected_ids,
         articles=articles_meta,
         tavily_sources=ver.get("sources", []),
@@ -938,7 +1022,86 @@ def get_tavily_stats():
     return get_tavily_telemetry_stats()
 
 
-# 8.2 Verifiable Structured Evidence Cards ("Receipts")
+# 8.2 Story Clusters & Verifiable Structured Evidence Cards ("Receipts")
+@app.get("/api/clusters")
+def list_story_clusters(macro: Optional[str] = Query(None), limit: int = Query(20, ge=1, le=50)):
+    """Lists recent semantic story clusters with independent wire origin counts and breakdowns."""
+    with get_db() as cur:
+        if macro:
+            norm_m = normalize_macro_tag(macro)
+            cur.execute("""
+                SELECT id, macro_tag, cluster_title, article_ids, independent_origins_count, origin_breakdown, created_at
+                FROM story_clusters
+                WHERE macro_tag = %s
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s;
+            """, (norm_m, limit))
+        else:
+            cur.execute("""
+                SELECT id, macro_tag, cluster_title, article_ids, independent_origins_count, origin_breakdown, created_at
+                FROM story_clusters
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s;
+            """, (limit,))
+        rows = cur.fetchall()
+        return [
+            {
+                "cluster_id": str(r[0]),
+                "macro_tag": r[1],
+                "cluster_title": r[2],
+                "article_ids": [str(aid) for aid in (r[3] or [])],
+                "independent_origins_count": r[4],
+                "origin_breakdown": r[5] or [],
+                "created_at": r[6].isoformat() if hasattr(r[6], "isoformat") else str(r[6])
+            }
+            for r in rows
+        ]
+
+
+@app.post("/api/intelligence/verify-evidence")
+def verify_articles_evidence(req: SynthesizeRequest):
+    """
+    On-demand verifiable receipts endpoint: takes 1+ article_ids, upserts a deterministic
+    story_cluster, and runs the 5-step verify_cluster_evidence() pipeline (atomic claims,
+    concurrent tri-angle Tavily searches, Tavily Extract, verbatim span grounding, wire origins).
+    """
+    if not req.article_ids:
+        raise HTTPException(status_code=400, detail="Provide at least 1 article ID.")
+    clean_ids = [validate_uuid(aid, "article_ids") for aid in req.article_ids]
+
+    with get_db() as cur:
+        cur.execute("""
+            SELECT id, title, tldr, clean_text, original_url, macro_tag, published_at
+            FROM articles WHERE id = ANY(%s::uuid[]);
+        """, (clean_ids,))
+        rows = cur.fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Articles not found.")
+
+    arts = [
+        {
+            "id": str(r[0]),
+            "title": r[1],
+            "tldr": r[2] or "",
+            "text": r[3] or "",
+            "url": r[4],
+            "macro_tag": r[5],
+            "published_at": r[6]
+        }
+        for r in rows
+    ]
+    primary_macro = arts[0].get("macro_tag") or "Tech"
+    cluster_title = f"{primary_macro} Verification Cluster: {arts[0]['title'][:65]}"
+    cluster_id = _upsert_story_cluster(
+        article_ids=[a["id"] for a in arts],
+        articles_for_origins=arts,
+        macro_tag=primary_macro,
+        cluster_title=cluster_title
+    )
+    return verify_cluster_evidence(arts, cluster_id=cluster_id)
+
+
 @app.get("/api/clusters/{cluster_id}/evidence")
 def get_cluster_evidence(cluster_id: str):
     """
@@ -958,10 +1121,12 @@ def get_cluster_evidence(cluster_id: str):
             cur.execute("SELECT article_ids FROM story_clusters WHERE id = %s;", (valid_id,))
             sc_row = cur.fetchone()
             if sc_row and sc_row[0]:
-                cur.execute("SELECT id, title, tldr, clean_text, original_url FROM articles WHERE id = ANY(%s::uuid[]);", (sc_row[0],))
-                arts = [{"id": str(r[0]), "title": r[1], "tldr": r[2], "text": r[3], "url": r[4]} for r in cur.fetchall()]
+                cur.execute("SELECT id, title, tldr, clean_text, original_url, published_at FROM articles WHERE id = ANY(%s::uuid[]);", (sc_row[0],))
+                arts = [
+                    {"id": str(r[0]), "title": r[1], "tldr": r[2], "text": r[3], "url": r[4], "published_at": r[5]}
+                    for r in cur.fetchall()
+                ]
                 if arts:
-                    from evidence_verifier import verify_cluster_evidence
                     return verify_cluster_evidence(arts, cluster_id=valid_id)
             raise HTTPException(status_code=404, detail="Evidence card not found for this cluster.")
 
@@ -974,6 +1139,58 @@ def get_cluster_evidence(cluster_id: str):
             "raw_evidence_citations": row[4],
             "computed_at": row[5].isoformat() if hasattr(row[5], "isoformat") else str(row[5])
         }
+
+
+# 8.3 Live Tavily RSS-less Site Watcher & Deep Research Endpoints
+@app.get("/api/tavily/watched-sites")
+def get_watched_sites():
+    """Returns monitored RSS-less newsrooms and recently discovered URLs via Tavily Map."""
+    from site_watcher import seed_watched_sites, get_active_sites
+    seed_watched_sites()
+    sites = get_active_sites()
+    recent_urls = []
+    try:
+        with get_db() as cur:
+            cur.execute("""
+                SELECT s.site_name, u.url_canonical, u.first_seen, u.is_ingested
+                FROM site_discovered_urls u
+                LEFT JOIN watched_sites s ON u.site_id = s.id
+                ORDER BY u.first_seen DESC
+                LIMIT 15;
+            """)
+            recent_urls = [
+                {
+                    "site_name": r[0] or extract_domain(r[1]),
+                    "url": r[1],
+                    "first_seen": r[2].isoformat() if hasattr(r[2], "isoformat") else str(r[2]),
+                    "is_ingested": bool(r[3])
+                }
+                for r in cur.fetchall()
+            ]
+    except Exception:
+        pass
+    return {"watched_sites": sites, "recently_discovered_urls": recent_urls}
+
+
+@app.post("/api/tavily/site-watch")
+def trigger_site_watch(req: Optional[SiteWatchTriggerRequest] = None):
+    """Triggers an on-demand Tavily Map + Extract monitoring cycle across RSS-less corporate newsrooms."""
+    from site_watcher import seed_watched_sites, run_site_watch_cycle
+    seed_watched_sites()
+    max_ext = req.max_extract_per_site if req else 2
+    discovered, ingested = run_site_watch_cycle(max_extract_per_site=max_ext)
+    return {
+        "status": "completed",
+        "newly_discovered_urls": discovered,
+        "newly_ingested_articles": ingested
+    }
+
+
+@app.post("/api/tavily/research")
+def execute_deep_research(req: DeepResearchRequest):
+    """Executes an exhaustive investigative report via Tavily Research API."""
+    model_tier = req.model if req.model in ("mini", "pro") else "mini"
+    return tavily_research(input_query=req.query, model=model_tier)
 
 
 # 9. Social Annotations & Comments

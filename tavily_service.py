@@ -3,6 +3,7 @@ import time
 import json
 import hashlib
 import logging
+import threading
 from typing import List, Dict, Any, Optional, Union
 from dotenv import load_dotenv
 from tavily import TavilyClient
@@ -15,12 +16,44 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_PROJECT = os.getenv("TAVILY_PROJECT", "agentic-news-intelligence")
 TAVILY_MOCK = os.getenv("TAVILY_MOCK", "0").lower() in ("1", "true")
 
+_lock = threading.Lock()
 _tavily_client: Optional[TavilyClient] = None
 _cache: Dict[str, tuple[float, Any]] = {}
 CACHE_TTL_SECONDS = 1800  # 30-minute in-memory cache
+MAX_CACHE_ENTRIES = 500   # Bounded cache cap to prevent unbounded memory growth
 
 # In-memory telemetry buffer for instantaneous access and offline fallback
 _telemetry_history: List[Dict[str, Any]] = []
+
+
+def _cache_get(key: str) -> Optional[Any]:
+    """Thread-safe TTL cache lookup with automatic expiration pruning."""
+    now = time.time()
+    with _lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            ts, val = hit
+            if now - ts < CACHE_TTL_SECONDS:
+                return val
+            del _cache[key]
+    return None
+
+
+def _cache_set(key: str, val: Any) -> None:
+    """Thread-safe bounded cache insertion with expired-first and oldest-entry eviction."""
+    now = time.time()
+    with _lock:
+        if len(_cache) >= MAX_CACHE_ENTRIES and key not in _cache:
+            # First prune expired entries
+            expired_keys = [k for k, (ts, _) in _cache.items() if now - ts >= CACHE_TTL_SECONDS]
+            for k in expired_keys:
+                del _cache[k]
+            # If still at capacity, evict the oldest entry
+            if len(_cache) >= MAX_CACHE_ENTRIES:
+                oldest_key = min(_cache.keys(), key=lambda k: _cache[k][0])
+                del _cache[oldest_key]
+        _cache[key] = (now, val)
+
 
 # Credit estimates per Tavily official pricing documentation
 CREDIT_ESTIMATES = {
@@ -38,15 +71,16 @@ CREDIT_ESTIMATES = {
 def get_tavily_client() -> Optional[TavilyClient]:
     """Retrieves or lazily instantiates the thread-safe TavilyClient."""
     global _tavily_client
-    if _tavily_client is None and not TAVILY_MOCK:
-        key = os.getenv("TAVILY_API_KEY")
-        if key and not key.startswith("tvly-YOUR"):
-            try:
-                _tavily_client = TavilyClient(api_key=key, project_id=TAVILY_PROJECT)
-                logger.info("[Tavily] Initialized TavilyClient with project: %s", TAVILY_PROJECT)
-            except Exception as e:
-                logger.warning("[Tavily] Client initialization failed: %s", e)
-    return _tavily_client
+    with _lock:
+        if _tavily_client is None and not TAVILY_MOCK:
+            key = os.getenv("TAVILY_API_KEY")
+            if key and not key.startswith("tvly-YOUR"):
+                try:
+                    _tavily_client = TavilyClient(api_key=key, project_id=TAVILY_PROJECT)
+                    logger.info("[Tavily] Initialized TavilyClient with project: %s", TAVILY_PROJECT)
+                except Exception as e:
+                    logger.warning("[Tavily] Client initialization failed: %s", e)
+        return _tavily_client
 
 
 def log_tavily_call(
@@ -74,9 +108,10 @@ def log_tavily_call(
         "cache_hit": cache_hit,
         "timestamp": time.time()
     }
-    _telemetry_history.append(call_record)
-    if len(_telemetry_history) > 1000:
-        _telemetry_history.pop(0)
+    with _lock:
+        _telemetry_history.append(call_record)
+        if len(_telemetry_history) > 1000:
+            _telemetry_history.pop(0)
 
     try:
         from db import pool
@@ -225,10 +260,10 @@ def search_news(
     params_hash = hashlib.sha1(params_key.encode("utf-8")).hexdigest()[:16]
 
     # Cache check
-    hit = _cache.get(params_key)
-    if hit and (time.time() - hit[0] < CACHE_TTL_SECONDS):
-        log_tavily_call("search", purpose, params_hash, 0.0, 0, len(hit[1]), cluster_id, cache_hit=True)
-        return hit[1]
+    cached = _cache_get(params_key)
+    if cached is not None:
+        log_tavily_call("search", purpose, params_hash, 0.0, 0, len(cached), cluster_id, cache_hit=True)
+        return cached
 
     if TAVILY_MOCK:
         mock_results = _load_mock_search_results(topic)
@@ -264,7 +299,7 @@ def search_news(
         latency = int((time.perf_counter() - t0) * 1000)
 
         log_tavily_call("search", purpose, params_hash, credits_cost, latency, len(results), cluster_id, cache_hit=False)
-        _cache[params_key] = (time.time(), results)
+        _cache_set(params_key, results)
         return results
     except Exception as e:
         latency = int((time.perf_counter() - t0) * 1000)
@@ -296,10 +331,10 @@ def tavily_extract(
     params_key = f"extract:{':'.join(sorted(url_list))}:{extract_depth}:{format}"
     params_hash = hashlib.sha1(params_key.encode("utf-8")).hexdigest()[:16]
 
-    hit = _cache.get(params_key)
-    if hit and (time.time() - hit[0] < CACHE_TTL_SECONDS):
-        log_tavily_call("extract", purpose, params_hash, 0.0, 0, len(hit[1].get("results", [])), cluster_id, cache_hit=True)
-        return hit[1]
+    cached = _cache_get(params_key)
+    if cached is not None:
+        log_tavily_call("extract", purpose, params_hash, 0.0, 0, len(cached.get("results", [])), cluster_id, cache_hit=True)
+        return cached
 
     if TAVILY_MOCK:
         mock_data = _load_mock_extract(url_list)
@@ -328,7 +363,7 @@ def tavily_extract(
         results = response.get("results", [])
 
         log_tavily_call("extract", purpose, params_hash, credits_cost, latency, len(results), cluster_id, cache_hit=False)
-        _cache[params_key] = (time.time(), response)
+        _cache_set(params_key, response)
         return response
     except Exception as e:
         latency = int((time.perf_counter() - t0) * 1000)
@@ -356,10 +391,10 @@ def tavily_map(
     params_key = f"map:{url}:{select_paths}:{max_depth}:{limit}"
     params_hash = hashlib.sha1(params_key.encode("utf-8")).hexdigest()[:16]
 
-    hit = _cache.get(params_key)
-    if hit and (time.time() - hit[0] < CACHE_TTL_SECONDS):
-        log_tavily_call("map", purpose, params_hash, 0.0, 0, len(hit[1].get("results", [])), cache_hit=True)
-        return hit[1]
+    cached = _cache_get(params_key)
+    if cached is not None:
+        log_tavily_call("map", purpose, params_hash, 0.0, 0, len(cached.get("results", [])), cache_hit=True)
+        return cached
 
     if TAVILY_MOCK:
         mock_data = _load_mock_map(url)
@@ -390,7 +425,7 @@ def tavily_map(
         results = response.get("results", [])
 
         log_tavily_call("map", purpose, params_hash, credits_cost, latency, len(results), cache_hit=False)
-        _cache[params_key] = (time.time(), response)
+        _cache_set(params_key, response)
         return response
     except Exception as e:
         latency = int((time.perf_counter() - t0) * 1000)
@@ -415,6 +450,11 @@ def tavily_crawl(
     """
     params_key = f"crawl:{url}:{select_paths}:{limit}:{extract_depth}"
     params_hash = hashlib.sha1(params_key.encode("utf-8")).hexdigest()[:16]
+
+    cached = _cache_get(params_key)
+    if cached is not None:
+        log_tavily_call("crawl", purpose, params_hash, 0.0, 0, len(cached.get("results", [])), cache_hit=True)
+        return cached
 
     if TAVILY_MOCK:
         mock_data = _load_mock_crawl(url)
@@ -441,6 +481,7 @@ def tavily_crawl(
         results = response.get("results", [])
 
         log_tavily_call("crawl", purpose, params_hash, 2.0, latency, len(results), cache_hit=False)
+        _cache_set(params_key, response)
         return response
     except Exception as e:
         latency = int((time.perf_counter() - t0) * 1000)
@@ -464,6 +505,11 @@ def tavily_research(
     params_key = f"research:{input_query}:{model}"
     params_hash = hashlib.sha1(params_key.encode("utf-8")).hexdigest()[:16]
 
+    cached = _cache_get(params_key)
+    if cached is not None:
+        log_tavily_call("research", purpose, params_hash, 0.0, 0, 1, cache_hit=True)
+        return cached
+
     if TAVILY_MOCK:
         mock_data = _load_mock_research(input_query)
         log_tavily_call("research", purpose, params_hash, 25.0, 50, 1, cache_hit=False)
@@ -483,8 +529,10 @@ def tavily_research(
             timeout=timeout
         )
         latency = int((time.perf_counter() - t0) * 1000)
+        res_dict = response if isinstance(response, dict) else {"report": str(response)}
         log_tavily_call("research", purpose, params_hash, credits_cost, latency, 1, cache_hit=False)
-        return response if isinstance(response, dict) else {"report": str(response)}
+        _cache_set(params_key, res_dict)
+        return res_dict
     except Exception as e:
         latency = int((time.perf_counter() - t0) * 1000)
         logger.error("[Tavily] research error for '%s': %s", input_query[:40], e)
@@ -523,11 +571,11 @@ def web_verify(
     cache_key = f"verify:{query.strip().lower()}"
     params_hash = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16]
 
-    hit = _cache.get(cache_key)
-    if hit and (time.time() - hit[0] < CACHE_TTL_SECONDS):
+    cached = _cache_get(cache_key)
+    if cached is not None:
         logger.info("[Tavily Cache] Hit for verification query: '%s'", query[:40])
-        log_tavily_call("search", "verification", params_hash, 0.0, 0, len(hit[1].get("sources", [])), cluster_id, cache_hit=True)
-        return hit[1]
+        log_tavily_call("search", "verification", params_hash, 0.0, 0, len(cached.get("sources", [])), cluster_id, cache_hit=True)
+        return cached
 
     # Exclude domains of local sources to prevent circular self-referential reporting
     excluded = list({extract_domain(u) for u in local_urls if u})[:150]
@@ -571,7 +619,7 @@ def web_verify(
         }
 
         log_tavily_call("search", "verification", params_hash, CREDIT_ESTIMATES["search_advanced"], latency, len(sources), cluster_id, cache_hit=False)
-        _cache[cache_key] = (time.time(), verified_data)
+        _cache_set(cache_key, verified_data)
         return verified_data
 
     except Exception as e:

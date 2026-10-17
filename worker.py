@@ -236,7 +236,35 @@ def process_batch() -> bool:
                     )
                     continue
 
-                # 1B. SLM-Led Triage -> Generative TL;DR Only
+                # 1B. Low-Confidence Escalation -> Full LLM Classification + TL;DR
+                if triage.needs_escalation:
+                    hint = (
+                        f"SLM Candidate Hint: Macro={triage.macro_tag} "
+                        f"(conf={triage.confidence:.2f}), Micro={', '.join(triage.micro_tags)}\n"
+                    )
+                    llm_macro, llm_micro, tldr = generate_full_enrichment(title, safe_text, hint=hint)
+                    from taxonomy import normalize_macro_tag
+                    norm_macro = normalize_macro_tag(llm_macro)
+                    merged_macros = list(dict.fromkeys([norm_macro] + triage.macro_tags))[:3]
+                    merged_micros = list(dict.fromkeys(llm_micro + triage.micro_tags))[:6]
+                    save_article_enrichment(
+                        art_id,
+                        macro=norm_macro,
+                        macro_tags=merged_macros,
+                        micro=merged_micros,
+                        tldr=tldr,
+                        title=title,
+                        conf=triage.confidence,
+                        on_topic=triage.on_topic_score
+                    )
+                    total_ms = (time.perf_counter() - t0) * 1000
+                    logger.info(
+                        "[Worker Escalated] %s -> %s / %s (Laya Conf: %.2f | Total: %.0fms)",
+                        title[:30], merged_macros, merged_micros, triage.confidence, total_ms
+                    )
+                    continue
+
+                # 1C. High-Confidence SLM Triage -> Generative TL;DR Only
                 tldr = generate_tldr_only(title, safe_text, triage.macro_tag, triage.micro_tags)
                 save_article_enrichment(
                     art_id,

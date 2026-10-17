@@ -150,6 +150,33 @@ def test_sse_parser_tolerance():
     assert "Framing Discrepancies" in result_text
 
 
+def test_bounded_cache_eviction():
+    orig_max = tavily_service.MAX_CACHE_ENTRIES
+    try:
+        tavily_service.MAX_CACHE_ENTRIES = 5
+        with tavily_service._lock:
+            tavily_service._cache.clear()
+        for i in range(8):
+            tavily_service._cache_set(f"test_key_{i}", {"idx": i})
+        assert len(tavily_service._cache) <= 5
+        # Oldest keys (0, 1, 2) should be evicted, newest (7) retained
+        assert tavily_service._cache_get("test_key_0") is None
+        assert tavily_service._cache_get("test_key_7") == {"idx": 7}
+    finally:
+        tavily_service.MAX_CACHE_ENTRIES = orig_max
+
+
+def test_deterministic_cluster_id():
+    from main import _compute_deterministic_cluster_id
+    id_a = "16b5a828-ad47-48da-88a9-8bab67bc7b3d"
+    id_b = "82a5ecf9-e6ab-4152-afae-5ca536361bd5"
+    # Order-independent deterministic UUIDv5
+    c1 = _compute_deterministic_cluster_id([id_a, id_b])
+    c2 = _compute_deterministic_cluster_id([id_b, id_a])
+    assert c1 == c2
+    assert len(c1) == 36
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print("      RUNNING TAVILY MULTI-ENDPOINT INTEGRATION SUITE")
@@ -176,6 +203,10 @@ if __name__ == "__main__":
     print("✓ test_byte_safe_hmac PASSED")
     test_sse_parser_tolerance()
     print("✓ test_sse_parser_tolerance PASSED")
+    test_bounded_cache_eviction()
+    print("✓ test_bounded_cache_eviction PASSED")
+    test_deterministic_cluster_id()
+    print("✓ test_deterministic_cluster_id (UUIDv5 Order-Invariance) PASSED")
     print("=" * 65)
-    print("[ALL 11 TAVILY INTEGRATION & MULTI-ENDPOINT TESTS PASSED!]")
+    print("[ALL 13 TAVILY INTEGRATION & MULTI-ENDPOINT TESTS PASSED!]")
     print("=" * 65)

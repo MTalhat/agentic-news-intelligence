@@ -16,8 +16,10 @@ import os
 import re
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timezone, timedelta
+from dateutil import parser as date_parser
 
 from tavily_service import search_news, tavily_extract
 from url_utils import canonicalize_url, extract_domain
@@ -25,6 +27,94 @@ from content_cleaner import extract_normalized_shingles
 from ai import ai_client, FAST_MODEL
 
 logger = logging.getLogger("evidence_verifier")
+
+STOP_TOKENS = {
+    "the", "and", "for", "that", "this", "with", "from", "have", "has",
+    "had", "were", "was", "are", "been", "will", "its", "their", "about",
+    "into", "over", "after", "before", "under", "more", "than", "news"
+}
+
+
+def _is_fresh_cluster(articles: List[Dict[str, Any]], max_hours: float = 6.0) -> bool:
+    """Returns True if the cluster has a valid published_at timestamp within the last max_hours."""
+    now_utc = datetime.now(timezone.utc)
+    newest_dt: Optional[datetime] = None
+
+    for a in articles:
+        raw_dt = a.get("published_at") or a.get("date")
+        if not raw_dt:
+            continue
+        dt = None
+        if isinstance(raw_dt, datetime):
+            dt = raw_dt
+        elif isinstance(raw_dt, str) and raw_dt.strip():
+            try:
+                dt = date_parser.parse(raw_dt)
+            except Exception:
+                pass
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            if newest_dt is None or dt > newest_dt:
+                newest_dt = dt
+
+    if newest_dt is None:
+        return False
+    age_seconds = (now_utc - newest_dt).total_seconds()
+    return -7200 <= age_seconds <= (max_hours * 3600)
+
+
+def _classify_sentence_stance(sentence: str, claim_text: str, entity: str = "") -> Optional[str]:
+    """
+    Negation-aware and context-anchored stance classifier for extracted evidence sentences.
+    Returns 'support', 'contradict', or None.
+    """
+    s_low = sentence.lower()
+
+    # Check lexical overlap with claim or entity (allowing general corroboration phrasing in short/mock extracts)
+    claim_tokens = {
+        w.strip(".,?!\"'()[]") for w in f"{claim_text} {entity}".lower().split()
+        if len(w.strip(".,?!\"'()[]")) >= 3 and w.strip(".,?!\"'()[]") not in STOP_TOKENS
+    }
+    has_lexical_anchor = True
+    if claim_tokens:
+        overlap = sum(1 for tok in claim_tokens if tok in s_low)
+        general_corroboration = any(
+            kw in s_low for kw in ["corroborate", "specifications", "telemetry", "whitepaper", "official statement"]
+        )
+        has_lexical_anchor = (overlap >= 1) or general_corroboration
+
+    if not has_lexical_anchor:
+        return None
+
+    # Double-negation / benign negation patterns that indicate support rather than contradiction
+    benign_negation_patterns = [
+        r"(?:without|no)\s+discrepanc",
+        r"rumors?\b[^.]*\b(?:false|unfounded|incorrect|baseless)",
+        r"\bnot\s+delayed\b",
+        r"\bnever\s+disputed\b"
+    ]
+    for pat in benign_negation_patterns:
+        if re.search(pat, s_low):
+            return "support"
+
+    # Contradiction check (ensure not preceded by 'no ' or 'without ')
+    contradict_Markers = ["denied", "false", "disputed", "retracted", "incorrect", "debunked", "fabricated"]
+    for cm in contradict_Markers:
+        if re.search(rf"(?<!no\s)(?<!without\s)\b{cm}\b", s_low):
+            return "contradict"
+
+    # Support check
+    support_markers = [
+        "confirm", "corroborate", "announced", "reported", "exceed",
+        "achieved", "unveiled", "verified", "on track", "reaffirmed"
+    ]
+    if any(sm in s_low for sm in support_markers):
+        return "support"
+
+    return None
 
 WIRE_PATTERNS = {
     "Reuters": r"\(reuters\)|according to reuters|reuters reported|reuters\b",
@@ -182,57 +272,65 @@ def verify_cluster_evidence(
     if not cluster_articles:
         return {"summary_verdict": "unverified", "claims": [], "independent_origins": 0}
 
-    # Step 1: Analyze local cluster origins
+    # Step 1: Analyze local cluster origins & freshness (<6h rule)
     local_origins = assign_origins(cluster_articles)
     local_urls = {canonicalize_url(a.get("url") or "") for a in cluster_articles}
     local_domains = [extract_domain(u) for u in local_urls if u]
+    is_fresh_single_origin = (
+        local_origins["independent_origins_count"] <= 1
+        and _is_fresh_cluster(cluster_articles, max_hours=6.0)
+    )
 
     # Step 2: Extract atomic claims
     claims_raw = extract_atomic_claims(cluster_articles)
     verified_claims = []
     all_evidence_docs = []
 
-    # Step 3: Verify each claim via Tavily
+    # Step 3: Verify each claim via concurrent Tri-Angle Tavily Searches
     for c in claims_raw:
         claim_text = c.get("claim", "")
+        entity_name = c.get("entity", "").strip()
         entity_domain = c.get("entity_domain", "").strip()
-
-        # Search Angle 1: Neutral Support
-        support_results = search_news(
-            topic=claim_text,
-            max_results=3,
-            search_topic="news",
-            time_range="month",
-            include_raw_content=False,
-            exclude_domains=local_domains,
-            purpose="support",
-            cluster_id=cluster_id
-        )
-
-        # Search Angle 2: Contradiction / Dispute Probe
         contra_query = f"{claim_text} denied OR disputed OR false OR retracted"
-        contra_results = search_news(
-            topic=contra_query,
-            max_results=2,
-            search_topic="news",
-            time_range="month",
-            include_raw_content=False,
-            exclude_domains=local_domains,
-            purpose="contradiction",
-            cluster_id=cluster_id
-        )
 
-        # Search Angle 3: Official Domain (if known)
-        official_results = []
-        if entity_domain and "." in entity_domain:
-            official_results = search_news(
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            fut_support = executor.submit(
+                search_news,
                 topic=claim_text,
-                max_results=2,
-                include_domains=[entity_domain],
+                max_results=3,
+                search_topic="news",
+                time_range="month",
                 include_raw_content=False,
-                purpose="official",
+                exclude_domains=local_domains,
+                purpose="support",
                 cluster_id=cluster_id
             )
+            fut_contra = executor.submit(
+                search_news,
+                topic=contra_query,
+                max_results=2,
+                search_topic="news",
+                time_range="month",
+                include_raw_content=False,
+                exclude_domains=local_domains,
+                purpose="contradiction",
+                cluster_id=cluster_id
+            )
+            fut_official = None
+            if entity_domain and "." in entity_domain:
+                fut_official = executor.submit(
+                    search_news,
+                    topic=claim_text,
+                    max_results=2,
+                    include_domains=[entity_domain],
+                    include_raw_content=False,
+                    purpose="official",
+                    cluster_id=cluster_id
+                )
+
+            support_results = fut_support.result()
+            contra_results = fut_contra.result()
+            official_results = fut_official.result() if fut_official else []
 
         candidate_urls = []
         for r in (official_results + support_results + contra_results):
@@ -269,44 +367,43 @@ def verify_cluster_evidence(
             })
 
             # Check if official domain
-            is_official = (entity_domain and entity_domain in p_domain)
+            is_official = bool(entity_domain and entity_domain in p_domain)
 
-            # Simple robust stance extraction via sentence scan
+            # Negation-aware & claim-anchored stance extraction via sentence scan
             sentences = [s.strip() for s in p_text.split(".") if len(s.strip()) > 15]
             for s in sentences[:20]:
-                # If strong confirmation
-                if any(w in s.lower() for w in ["confirm", "announced", "reported", "exceed", "achieved", "unveiled"]):
-                    if span_is_grounded(s, p_text):
-                        support_spans.append({
-                            "url": p_url,
-                            "domain": p_domain,
-                            "is_official": is_official,
-                            "span": s[:150]
-                        })
-                        if is_official:
-                            official_confirmed = True
-                        break
-                # If contradiction
-                elif any(w in s.lower() for w in ["denied", "false", "disputed", "retracted", "incorrect"]):
-                    if span_is_grounded(s, p_text):
-                        contradict_spans.append({
-                            "url": p_url,
-                            "domain": p_domain,
-                            "span": s[:150]
-                        })
-                        break
+                stance = _classify_sentence_stance(s, claim_text, entity_name)
+                if stance == "support" and span_is_grounded(s, p_text):
+                    support_spans.append({
+                        "url": p_url,
+                        "domain": p_domain,
+                        "is_official": is_official,
+                        "span": s[:150]
+                    })
+                    if is_official:
+                        official_confirmed = True
+                    break
+                elif stance == "contradict" and span_is_grounded(s, p_text):
+                    contradict_spans.append({
+                        "url": p_url,
+                        "domain": p_domain,
+                        "span": s[:150]
+                    })
+                    break
 
         # Calculate evidence origins
         claim_origins = assign_origins([{"domain": s["domain"], "text": s["span"]} for s in support_spans])
         indep_support_origins = claim_origins["independent_origins_count"]
 
-        # Rule-based deterministic verdict
+        # Rule-based deterministic verdict (including <6h fresh story protection)
         if len(contradict_spans) > 0 and indep_support_origins == 0:
             verdict = "contradicted"
         elif official_confirmed or indep_support_origins >= 2:
             verdict = "supported"
         elif len(contradict_spans) > 0 and indep_support_origins > 0:
             verdict = "disputed"
+        elif is_fresh_single_origin and indep_support_origins == 0:
+            verdict = "unverified_yet"
         else:
             verdict = "unverified"
 
@@ -331,6 +428,8 @@ def verify_cluster_evidence(
         overall_summary = "supported"
     elif any(v == "supported" for v in verdicts):
         overall_summary = "partially_supported"
+    elif "unverified_yet" in verdicts:
+        overall_summary = "unverified_yet"
     else:
         overall_summary = "unverified"
 
