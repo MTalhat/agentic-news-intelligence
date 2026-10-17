@@ -171,13 +171,19 @@ def sanitize_and_prewarm_db() -> None:
                     (new_p, new_arr, new_mics, aid),
                 )
 
-        # Remove legacy 1-line stub digests or digests pointing to Tesla/Demo in Gaming
+        # Remove legacy 1-line stub digests or digests containing YouTube/social citations
         cur.execute("""
             DELETE FROM daily_intelligence_digests
             WHERE LENGTH(COALESCE(synthesis_markdown, '')) < 120
                OR synthesis_markdown LIKE 'Daily consensus summary:%'
                OR cluster_title ILIKE '%Tavily Demo%'
+               OR tavily_evidence::text ILIKE '%youtube.com%'
                OR (macro_tag = 'Gaming' AND cluster_title ILIKE '%Tesla%');
+        """)
+        cur.execute("""
+            DELETE FROM evidence_cards
+            WHERE raw_evidence_citations::text ILIKE '%youtube.com%'
+               OR raw_evidence_citations::text ILIKE '%facebook.com%';
         """)
 
         # Ensure story_clusters has at least 1 cluster per populated macro category

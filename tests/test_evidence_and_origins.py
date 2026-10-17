@@ -153,6 +153,24 @@ def test_balanced_candidate_selection_and_anti_circular_guard():
     assert "https://ft.com/content/b200-delay-1" in selected
     assert "https://wsj.com/articles/b200-delay-2" in selected
 
+    # Verify social/video platforms (youtube.com, reddit.com) are rejected and regional mirrors (me.pcmag.com / au.pcmag.com) deduplicated
+    noisy_support = [
+        {"url": "https://www.youtube.com/watch?v=12345", "score": 0.99},
+        {"url": "https://www.reddit.com/r/hardware/comments/abc", "score": 0.95},
+        {"url": "https://me.pcmag.com/chips/999/tsmc-2nm", "score": 0.88},
+        {"url": "https://au.pcmag.com/chips/999/tsmc-2nm-au", "score": 0.87},
+        {"url": "https://www.reuters.com/technology/tsmc-2nm-yields", "score": 0.80}
+    ]
+    clean_selected = _select_balanced_candidate_urls(
+        official_results=[],
+        support_results=noisy_support,
+        contra_results=[],
+        local_urls=set()
+    )
+    assert all("youtube.com" not in u and "reddit.com" not in u for u in clean_selected)
+    # Reuters (Tier-1 authority) ranked first, and only 1 PCMag regional mirror kept on initial pass
+    assert clean_selected[0] == "https://www.reuters.com/technology/tsmc-2nm-yields"
+
 
 if __name__ == "__main__":
     print("=" * 65)
@@ -177,4 +195,5 @@ if __name__ == "__main__":
     print("=" * 65)
     print("[ALL 8 EVIDENCE & ORIGIN TESTS PASSED!]")
     print("=" * 65)
+
 

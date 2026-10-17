@@ -167,21 +167,88 @@ def span_is_grounded(quote_span: str, source_text: str) -> bool:
     return normalize(quote_span) in normalize(source_text)
 
 
+# Low-signal social, video, and UGC domains excluded from factual verification receipts
+LOW_QUALITY_EVIDENCE_DOMAINS = [
+    "youtube.com", "youtu.be", "facebook.com", "twitter.com", "x.com",
+    "reddit.com", "tiktok.com", "instagram.com", "pinterest.com",
+    "quora.com", "medium.com", "linkedin.com", "tumblr.com", "wikipedia.org",
+    "twitch.tv", "discord.com", "threads.net"
+]
+
+# High-credibility wire services, peer-reviewed journals, and tier-1 technical/financial outlets
+TIER1_AUTHORITY_DOMAINS = {
+    "reuters.com", "apnews.com", "bloomberg.com", "ft.com", "wsj.com",
+    "nytimes.com", "bbc.com", "bbc.co.uk", "cnbc.com", "economist.com",
+    "nature.com", "science.org", "ieee.org", "acm.org", "arxiv.org",
+    "arstechnica.com", "theverge.com", "techcrunch.com", "wired.com",
+    "tomshardware.com", "anandtech.com", "semianalysis.com", "electrek.co",
+    "autonews.com", "eurogamer.net", "pcgamer.com", "polygon.com", "ign.com",
+    "pcmag.com", "zdnet.com", "cnet.com", "engadget.com", "venturebeat.com",
+    "nvidia.com", "tsmc.com", "amd.com", "intel.com", "openai.com",
+    "anthropic.com", "deepmind.google", "microsoft.com", "apple.com", "nasa.gov"
+}
+
+
+def _root_publisher_domain(domain: str) -> str:
+    """
+    Normalizes regional/edition subdomains (e.g. 'me.pcmag.com' & 'au.pcmag.com' -> 'pcmag.com',
+    'canada.autonews.com' -> 'autonews.com', 'uk.finance.yahoo.com' -> 'yahoo.com')
+    so regional mirrors of the same outlet are never double-counted as independent origins.
+    """
+    d = (domain or "").strip().lower().removeprefix("www.")
+    if not d:
+        return ""
+    parts = d.split(".")
+    # Handle 2-part country TLDs like .co.uk, .com.au, .org.uk
+    if len(parts) >= 3 and parts[-2] in ("co", "com", "org", "gov", "ac", "edu") and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    if len(parts) >= 3:
+        return ".".join(parts[-2:])
+    return d
+
+
+def _is_low_quality_domain(url_or_domain: str) -> bool:
+    """Returns True if the domain is a social network, video platform, or UGC forum."""
+    d = extract_domain(url_or_domain) if "://" in url_or_domain else (url_or_domain or "").lower()
+    root_d = _root_publisher_domain(d)
+    return any(
+        d == b or root_d == b or d.endswith("." + b)
+        for b in LOW_QUALITY_EVIDENCE_DOMAINS
+    )
+
+
+def _score_source_authority(url_or_domain: str) -> int:
+    """
+    Scores source credibility so Tier-1 wire services, institutional (.gov/.edu) domains,
+    and established technical publications are prioritized over minor blogs.
+    """
+    if _is_low_quality_domain(url_or_domain):
+        return -100
+    d = extract_domain(url_or_domain) if "://" in url_or_domain else (url_or_domain or "").lower()
+    root_d = _root_publisher_domain(d)
+    if d.endswith((".gov", ".edu", ".mil", ".int")) or ".gov." in d or ".edu." in d or d.endswith("europa.eu"):
+        return 30
+    if d in TIER1_AUTHORITY_DOMAINS or root_d in TIER1_AUTHORITY_DOMAINS:
+        return 20
+    return 10
+
+
 def detect_wire_origin(text: str, url_or_domain: str = "") -> str:
     """
     Detects if an article text has an explicit wire agency dateline/byline in its lead/attribution,
-    otherwise returns its canonical domain.
+    otherwise returns its normalized root publisher domain.
     """
     domain = extract_domain(url_or_domain) if "://" in url_or_domain else (url_or_domain or "Independent Web")
     for wire_name, pattern in WIRE_PATTERNS.items():
         if re.search(pattern, (text or "")[:2500], re.IGNORECASE):
             return wire_name
-    return domain
+    return _root_publisher_domain(domain) or domain
 
 
 def assign_origins(articles: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Analyzes a list of articles/evidence documents to detect wire copy syndications.
+    Analyzes a list of articles/evidence documents to detect wire copy syndications
+    and regional subdomain mirrors.
     Demonstrates to hackathon judges that '7 articles != 7 independent sources'.
     Returns independent origins count and structured origin breakdown.
     """
@@ -194,6 +261,7 @@ def assign_origins(articles: List[Dict[str, Any]]) -> Dict[str, Any]:
     for art in articles:
         text = art.get("text") or art.get("clean_text") or art.get("content") or art.get("snippet") or ""
         domain = art.get("domain") or extract_domain(art.get("url") or "")
+        root_domain = _root_publisher_domain(domain) or domain
         title = art.get("title") or "Article"
 
         # 1. Check for explicit wire service datelines/bylines/attributions
@@ -203,7 +271,7 @@ def assign_origins(articles: List[Dict[str, Any]]) -> Dict[str, Any]:
                 detected_wire = wire_name
                 break
 
-        origin_name = detected_wire or domain or "Independent Web"
+        origin_name = detected_wire or root_domain or "Independent Web"
         origin_type = "wire_syndication" if detected_wire else "original_reporting"
 
         # 2. Check for Jaccard shingle similarity across existing documents
@@ -263,12 +331,30 @@ def _select_balanced_candidate_urls(
       - Up to 1 Official source URL
       - Up to 2 Support URLs
       - Up to 2 Contradiction URLs
-    Prevents support/official hits from starving contradiction evidence before Tavily Extract.
+    Prioritizes Tier-1 authoritative domains, blocks social/video/UGC platforms (YouTube, Reddit, etc.),
+    and deduplicates regional publisher mirrors (e.g. me.pcmag.com vs au.pcmag.com).
     """
     selected: List[str] = []
     seen_canonical = set(local_urls)
+    seen_root_publishers = {
+        _root_publisher_domain(extract_domain(u))
+        for u in local_urls
+        if u
+    }
 
-    def _take_from(results_list: List[Dict[str, Any]], quota: int):
+    def _rank_bucket(results_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        valid = [r for r in results_list if not _is_low_quality_domain(r.get("url") or "")]
+        return sorted(
+            valid,
+            key=lambda r: (_score_source_authority(r.get("url") or ""), float(r.get("score") or 0.0)),
+            reverse=True
+        )
+
+    ranked_official = _rank_bucket(official_results)
+    ranked_support = _rank_bucket(support_results)
+    ranked_contra = _rank_bucket(contra_results)
+
+    def _take_from(results_list: List[Dict[str, Any]], quota: int, enforce_unique_publisher: bool = True):
         taken = 0
         for r in results_list:
             if taken >= quota or len(selected) >= 5:
@@ -277,18 +363,24 @@ def _select_balanced_candidate_urls(
             if not u:
                 continue
             cu = canonicalize_url(u)
-            if cu and cu not in seen_canonical:
-                seen_canonical.add(cu)
-                selected.append(u)
-                taken += 1
+            root_pub = _root_publisher_domain(extract_domain(cu))
+            if not cu or cu in seen_canonical:
+                continue
+            if enforce_unique_publisher and root_pub and root_pub in seen_root_publishers:
+                continue
+            seen_canonical.add(cu)
+            if root_pub:
+                seen_root_publishers.add(root_pub)
+            selected.append(u)
+            taken += 1
 
-    _take_from(official_results, quota=1)
-    _take_from(support_results, quota=2)
-    _take_from(contra_results, quota=2)
+    _take_from(ranked_official, quota=1, enforce_unique_publisher=True)
+    _take_from(ranked_support, quota=2, enforce_unique_publisher=True)
+    _take_from(ranked_contra, quota=2, enforce_unique_publisher=True)
 
-    # If still under 5 URLs, backfill from remaining support or contradiction results
+    # Backfill if needed from remaining high-credibility results
     if len(selected) < 5:
-        _take_from(support_results + contra_results + official_results, quota=5 - len(selected))
+        _take_from(ranked_support + ranked_contra + ranked_official, quota=5 - len(selected), enforce_unique_publisher=False)
 
     return selected[:5]
 
@@ -379,6 +471,8 @@ def verify_cluster_evidence(
     local_origins = assign_origins(cluster_articles)
     local_urls = {canonicalize_url(a.get("url") or "") for a in cluster_articles if a.get("url")}
     local_domains = [extract_domain(u) for u in local_urls if u]
+    local_root_domains = [_root_publisher_domain(d) for d in local_domains if d]
+    excluded_search_domains = sorted(set(local_domains + local_root_domains + LOW_QUALITY_EVIDENCE_DOMAINS))
     is_fresh_single_origin = (
         local_origins["independent_origins_count"] <= 1
         and _is_fresh_cluster(cluster_articles, max_hours=6.0)
@@ -395,7 +489,7 @@ def verify_cluster_evidence(
         entity_name = c.get("entity", "").strip()
         entity_domain = c.get("entity_domain", "").strip().lower()
         # Enforce anti-circular domain guard (N3): reporting domain cannot be official source
-        if entity_domain and any(ld and (ld == entity_domain or entity_domain.endswith("." + ld)) for ld in local_domains):
+        if entity_domain and any(ld and (ld == entity_domain or entity_domain.endswith("." + ld)) for ld in local_domains + local_root_domains):
             entity_domain = ""
 
         contra_query = f"{claim_text} denied OR disputed OR false OR retracted"
@@ -408,7 +502,7 @@ def verify_cluster_evidence(
                 search_topic="news",
                 time_range="month",
                 include_raw_content=False,
-                exclude_domains=local_domains,
+                exclude_domains=excluded_search_domains,
                 purpose="support",
                 cluster_id=cluster_id
             )
@@ -419,7 +513,7 @@ def verify_cluster_evidence(
                 search_topic="news",
                 time_range="month",
                 include_raw_content=False,
-                exclude_domains=local_domains,
+                exclude_domains=excluded_search_domains,
                 purpose="contradiction",
                 cluster_id=cluster_id
             )

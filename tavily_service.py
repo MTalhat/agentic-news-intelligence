@@ -715,7 +715,13 @@ def web_verify(
     if not client:
         return empty_result
 
-    excluded = sorted({extract_domain(u) for u in local_urls if u})[:150]
+    social_ugc_blocklist = {
+        "youtube.com", "youtu.be", "facebook.com", "twitter.com", "x.com",
+        "reddit.com", "tiktok.com", "instagram.com", "pinterest.com",
+        "quora.com", "medium.com", "linkedin.com", "tumblr.com", "wikipedia.org"
+    }
+    local_doms = {extract_domain(u) for u in local_urls if u}
+    excluded = sorted(local_doms | social_ugc_blocklist)[:150]
     cache_key = json.dumps({"op": "verify", "q": query.strip().lower(), "ex": excluded}, sort_keys=True)
     params_hash = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16]
 
@@ -752,6 +758,7 @@ def web_verify(
                 "is_demo": False
             }
             for r in results
+            if extract_domain(r.get("url", "")) not in social_ugc_blocklist
         ]
 
         ctx_lines = ["INDEPENDENT THIRD-PARTY CITATIONS:"]
