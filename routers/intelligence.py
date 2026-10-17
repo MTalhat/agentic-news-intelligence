@@ -464,19 +464,27 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
 
             if not cached_evidence_card:
                 cur.execute("""
-                    SELECT claims, summary_verdict, independent_origins, total_sources, raw_evidence_citations, created_at
-                    FROM evidence_cards WHERE cluster_id = %s;
+                    SELECT e.claims, e.summary_verdict, e.independent_origins, e.total_sources, 
+                           e.raw_evidence_citations, e.tavily_telemetry, e.created_at, sc.origin_breakdown
+                    FROM evidence_cards e
+                    LEFT JOIN story_clusters sc ON sc.id = e.cluster_id
+                    WHERE e.cluster_id = %s;
                 """, (det_cluster_id,))
                 ec_row = cur.fetchone()
                 if ec_row:
+                    telem = ec_row[5] if isinstance(ec_row[5], dict) else {}
+                    ts_iso = ec_row[6].isoformat() if hasattr(ec_row[6], "isoformat") else str(ec_row[6])
                     cached_evidence_card = {
                         "cluster_id": det_cluster_id,
                         "claims": ec_row[0],
                         "summary_verdict": ec_row[1],
+                        "recheck_at": telem.get("recheck_at"),
                         "independent_origins_count": ec_row[2],
                         "total_sources": ec_row[3],
+                        "origin_breakdown": telem.get("origin_breakdown") or ec_row[7] or [],
                         "raw_evidence_citations": ec_row[4],
-                        "verified_at": ec_row[5].isoformat() if hasattr(ec_row[5], "isoformat") else str(ec_row[5])
+                        "verified_at": ts_iso,
+                        "computed_at": ts_iso
                     }
                     needs_cache_update = True
                 elif origin_docs:
@@ -577,7 +585,8 @@ def get_daily_digest(user_id: Optional[str] = Query(None), macro: Optional[str] 
                 SELECT id, title, source_feed, original_url, embedding, macro_tag
                 FROM articles
                 WHERE is_processed = TRUE 
-                  AND (macro_tag IS NULL OR macro_tag != 'Off-Topic')
+                  AND macro_tag IS NOT NULL
+                  AND macro_tag != 'Off-Topic'
                   AND (on_topic_score IS NULL OR on_topic_score >= 0.40)
                   AND embedding IS NOT NULL
                 ORDER BY published_at DESC LIMIT 1;
@@ -743,9 +752,11 @@ def get_cluster_evidence(cluster_id: str):
     valid_id = validate_uuid(cluster_id, "cluster_id")
     with get_db() as cur:
         cur.execute("""
-            SELECT claims, summary_verdict, independent_origins, total_sources, raw_evidence_citations, created_at
-            FROM evidence_cards
-            WHERE cluster_id = %s;
+            SELECT e.claims, e.summary_verdict, e.independent_origins, e.total_sources, 
+                   e.raw_evidence_citations, e.tavily_telemetry, e.created_at, sc.origin_breakdown
+            FROM evidence_cards e
+            LEFT JOIN story_clusters sc ON sc.id = e.cluster_id
+            WHERE e.cluster_id = %s;
         """, (valid_id,))
         row = cur.fetchone()
         if not row:
@@ -761,14 +772,19 @@ def get_cluster_evidence(cluster_id: str):
                     return verify_cluster_evidence(arts, cluster_id=valid_id)
             raise HTTPException(status_code=404, detail="Evidence card not found for this cluster.")
 
+        telem = row[5] if isinstance(row[5], dict) else {}
+        ts_iso = row[6].isoformat() if hasattr(row[6], "isoformat") else str(row[6])
         return {
             "cluster_id": valid_id,
             "claims": row[0],
             "summary_verdict": row[1],
+            "recheck_at": telem.get("recheck_at"),
             "independent_origins_count": row[2],
             "total_sources": row[3],
+            "origin_breakdown": telem.get("origin_breakdown") or row[7] or [],
             "raw_evidence_citations": row[4],
-            "computed_at": row[5].isoformat() if hasattr(row[5], "isoformat") else str(row[5])
+            "verified_at": ts_iso,
+            "computed_at": ts_iso
         }
 
 

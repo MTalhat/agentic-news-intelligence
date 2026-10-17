@@ -8,7 +8,7 @@ import sys
 import logging
 from db import get_db
 from content_cleaner import clean_article_markdown
-from taxonomy import extract_domain_keywords, clean_micro_tags
+from taxonomy import extract_domain_keywords, clean_micro_tags, refine_macro_classification
 
 sys.stdout.reconfigure(encoding="utf-8")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -18,7 +18,7 @@ def run_migration():
     logger.info("Starting database markdown cleaning migration...")
     
     with get_db() as cur:
-        cur.execute("SELECT id, title, clean_text, micro_tags, macro_tags FROM articles ORDER BY created_at ASC;")
+        cur.execute("SELECT id, title, clean_text, micro_tags, macro_tag, macro_tags FROM articles ORDER BY created_at ASC;")
         rows = cur.fetchall()
 
     logger.info("Found %d articles to evaluate.", len(rows))
@@ -28,7 +28,7 @@ def run_migration():
     tags_corrected = 0
 
     with get_db() as cur:
-        for aid, title, raw_text, old_micros, macro_tags in rows:
+        for aid, title, raw_text, old_micros, macro_tag, macro_tags in rows:
             if not raw_text:
                 continue
 
@@ -44,24 +44,26 @@ def run_migration():
                 updated_micros = [m for m in updated_micros if m != "electric_vehicles"]
                 tags_corrected += 1
 
-            # If article had gaming incorrectly due to nav links, fix it if it's clearly AI/Tech
-            updated_macros = list(macro_tags) if macro_tags else []
-            if "Gaming" in updated_macros and ("google" in title.lower() or "deepmind" in title.lower() or "embedding" in title.lower()):
-                updated_macros = [m for m in updated_macros if m != "Gaming"]
-                if "AI" not in updated_macros:
-                    updated_macros.append("AI")
-                if "Tech" not in updated_macros:
-                    updated_macros.append("Tech")
+            updated_macro = macro_tag
+            updated_macros = list(macro_tags) if macro_tags else ([macro_tag] if macro_tag else [])
+            if updated_macro and updated_macro != "Off-Topic":
+                updated_macro, updated_macros = refine_macro_classification(
+                    title, cleaned_text, updated_macro, updated_macros
+                )
 
             has_text_changed = (len(cleaned_text) < orig_len)
-            has_tags_changed = (updated_micros != (old_micros or [])) or (updated_macros != (macro_tags or []))
+            has_tags_changed = (
+                (updated_micros != (old_micros or []))
+                or (updated_macro != macro_tag)
+                or (updated_macros != (macro_tags or []))
+            )
 
             if has_text_changed or has_tags_changed:
                 cur.execute("""
                     UPDATE articles 
-                    SET clean_text = %s, micro_tags = %s, macro_tags = %s
+                    SET clean_text = %s, micro_tags = %s, macro_tag = %s, macro_tags = %s
                     WHERE id = %s;
-                """, (cleaned_text, updated_micros, updated_macros, aid))
+                """, (cleaned_text, updated_micros, updated_macro, updated_macros, aid))
                 
                 if has_text_changed:
                     cleaned_count += 1

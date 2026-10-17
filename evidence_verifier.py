@@ -559,14 +559,23 @@ def verify_cluster_evidence(
     elif overall == "disputed":
         recheck_at = (now_utc + timedelta(hours=6)).isoformat()
 
+    raw_citations = [
+        {"url": d.get("url", ""), "domain": d.get("domain", ""), "title": d.get("title", "")}
+        for d in all_evidence_docs
+    ]
+    now_iso = now_utc.isoformat()
+
     result_card = {
         "cluster_id": cluster_id,
         "summary_verdict": overall,
         "recheck_at": recheck_at,
         "independent_origins_count": combined_origins["independent_origins_count"],
+        "total_sources": combined_origins["total_sources"],
         "origin_breakdown": combined_origins["origins"],
         "claims": verified_claims,
-        "verified_at": now_utc.isoformat()
+        "raw_evidence_citations": raw_citations,
+        "verified_at": now_iso,
+        "computed_at": now_iso
     }
 
     # Persist to PostgreSQL evidence_cards if cluster_id is provided
@@ -577,14 +586,15 @@ def verify_cluster_evidence(
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO evidence_cards 
-                            (cluster_id, claims, summary_verdict, independent_origins, total_sources, raw_evidence_citations)
-                        VALUES (%s, %s::jsonb, %s, %s, %s, %s::jsonb)
+                            (cluster_id, claims, summary_verdict, independent_origins, total_sources, raw_evidence_citations, tavily_telemetry)
+                        VALUES (%s, %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb)
                         ON CONFLICT (cluster_id) DO UPDATE 
                         SET claims = EXCLUDED.claims,
                             summary_verdict = EXCLUDED.summary_verdict,
                             independent_origins = EXCLUDED.independent_origins,
                             total_sources = EXCLUDED.total_sources,
                             raw_evidence_citations = EXCLUDED.raw_evidence_citations,
+                            tavily_telemetry = EXCLUDED.tavily_telemetry,
                             created_at = NOW();
                     """, (
                         cluster_id,
@@ -592,13 +602,15 @@ def verify_cluster_evidence(
                         overall,
                         combined_origins["independent_origins_count"],
                         combined_origins["total_sources"],
-                        json.dumps([
-                            {"url": d.get("url", ""), "domain": d.get("domain", ""), "title": d.get("title", "")}
-                            for d in all_evidence_docs
-                        ])
+                        json.dumps(raw_citations),
+                        json.dumps({
+                            "recheck_at": recheck_at,
+                            "origin_breakdown": combined_origins["origins"]
+                        })
                     ))
                 conn.commit()
         except Exception as e:
             logger.info("[Evidence] DB save note (offline/test mode): %s", e)
 
     return result_card
+

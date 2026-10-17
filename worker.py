@@ -363,9 +363,10 @@ def process_batch() -> bool:
                     UPDATE articles 
                     SET retry_count = %s,
                         error_message = %s,
-                        is_processed = %s
+                        is_processed = %s,
+                        macro_tag = CASE WHEN %s THEN COALESCE(macro_tag, 'Off-Topic') ELSE macro_tag END
                     WHERE id = %s;
-                """, (current_retries, err_msg, give_up, art_id))
+                """, (current_retries, err_msg, give_up, give_up, art_id))
     
     return True
 

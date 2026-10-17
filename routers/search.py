@@ -37,7 +37,8 @@ def execute_hybrid_search(q: str, grouped: bool = False, limit: int = 12):
                1.0 / (60.0 + ROW_NUMBER() OVER (ORDER BY embedding <=> %(q_vec)s::vector ASC)) AS score
         FROM articles
         WHERE is_processed = TRUE 
-          AND (macro_tag IS NULL OR macro_tag != 'Off-Topic')
+          AND macro_tag IS NOT NULL
+          AND macro_tag != 'Off-Topic'
           AND embedding IS NOT NULL
           AND (embedding <=> %(q_vec)s::vector) < 0.78
         ORDER BY (embedding <=> %(q_vec)s::vector) ASC
@@ -51,7 +52,8 @@ def execute_hybrid_search(q: str, grouped: bool = False, limit: int = 12):
                )) AS score
         FROM articles
         WHERE is_processed = TRUE 
-          AND (macro_tag IS NULL OR macro_tag != 'Off-Topic')
+          AND macro_tag IS NOT NULL
+          AND macro_tag != 'Off-Topic'
           AND to_tsvector('english', title || ' ' || clean_text) @@ websearch_to_tsquery('english', %(q)s)
         ORDER BY ts_rank_cd(to_tsvector('english', title || ' ' || clean_text), websearch_to_tsquery('english', %(q)s)) DESC
         LIMIT 25
@@ -70,7 +72,8 @@ def execute_hybrid_search(q: str, grouped: bool = False, limit: int = 12):
                )) AS score
         FROM articles
         WHERE is_processed = TRUE 
-          AND (macro_tag IS NULL OR macro_tag != 'Off-Topic')
+          AND macro_tag IS NOT NULL
+          AND macro_tag != 'Off-Topic'
           AND cardinality(%(kw_like_patterns)s::text[]) > 0
           AND (
               title ILIKE ANY(%(kw_like_patterns)s::text[])

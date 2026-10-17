@@ -122,6 +122,34 @@ def sanitize_and_prewarm_db() -> None:
         """)
 
         cur.execute("""
+            SELECT id, title, clean_text, tldr
+            FROM articles
+            WHERE is_processed = TRUE AND (macro_tag IS NULL OR embedding IS NULL);
+        """)
+        untagged_rows = cur.fetchall()
+        if untagged_rows:
+            from embedder import get_embedder
+            emb_engine = get_embedder()
+            for aid, title, ctext, tldr in untagged_rows:
+                p_mac, m_arr = refine_macro_classification(title, ctext or "", "Tech", ["Tech"])
+                kws = extract_domain_keywords(title, ctext or "")
+                valid_subs = list(get_subtags_for_macro(p_mac).keys())
+                mics = clean_micro_tags(kws + valid_subs[:3], max_tags=5)
+                safe_tldr = tldr or f"{title}. {(ctext or '')[:180].strip()}."
+                vec = emb_engine.embed_text(f"{title}. {safe_tldr}")
+                cur.execute("""
+                    UPDATE articles
+                    SET macro_tag = COALESCE(macro_tag, %s),
+                        macro_tags = COALESCE(macro_tags, %s),
+                        micro_tags = COALESCE(micro_tags, %s),
+                        tldr = COALESCE(tldr, %s),
+                        embedding = COALESCE(embedding, %s::vector),
+                        on_topic_score = COALESCE(on_topic_score, 0.85),
+                        confidence_score = COALESCE(confidence_score, 0.80)
+                    WHERE id = %s;
+                """, (p_mac, m_arr, mics, safe_tldr, vec, aid))
+
+        cur.execute("""
             SELECT id, title, clean_text, macro_tag, macro_tags, micro_tags 
             FROM articles 
             WHERE is_processed = TRUE AND macro_tag IS NOT NULL AND macro_tag != 'Off-Topic';
