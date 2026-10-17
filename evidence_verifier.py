@@ -175,17 +175,21 @@ LOW_QUALITY_EVIDENCE_DOMAINS = [
     "twitch.tv", "discord.com", "threads.net"
 ]
 
-# High-credibility wire services, peer-reviewed journals, and tier-1 technical/financial outlets
-TIER1_AUTHORITY_DOMAINS = {
+# Tier-1 global wire services, financial records, and peer-reviewed scientific journals
+TIER1_WIRE_AND_SCIENCE_DOMAINS = {
     "reuters.com", "apnews.com", "bloomberg.com", "ft.com", "wsj.com",
     "nytimes.com", "bbc.com", "bbc.co.uk", "cnbc.com", "economist.com",
     "nature.com", "science.org", "ieee.org", "acm.org", "arxiv.org",
+    "nvidia.com", "tsmc.com", "amd.com", "intel.com", "openai.com",
+    "anthropic.com", "deepmind.google", "microsoft.com", "apple.com", "nasa.gov"
+}
+
+# Tier-2 established domain-specialist technology and automotive publications
+TIER2_TECH_MEDIA_DOMAINS = {
     "arstechnica.com", "theverge.com", "techcrunch.com", "wired.com",
     "tomshardware.com", "anandtech.com", "semianalysis.com", "electrek.co",
     "autonews.com", "eurogamer.net", "pcgamer.com", "polygon.com", "ign.com",
-    "pcmag.com", "zdnet.com", "cnet.com", "engadget.com", "venturebeat.com",
-    "nvidia.com", "tsmc.com", "amd.com", "intel.com", "openai.com",
-    "anthropic.com", "deepmind.google", "microsoft.com", "apple.com", "nasa.gov"
+    "pcmag.com", "zdnet.com", "cnet.com", "engadget.com", "venturebeat.com"
 }
 
 
@@ -219,8 +223,9 @@ def _is_low_quality_domain(url_or_domain: str) -> bool:
 
 def _score_source_authority(url_or_domain: str) -> int:
     """
-    Scores source credibility so Tier-1 wire services, institutional (.gov/.edu) domains,
-    and established technical publications are prioritized over minor blogs.
+    Scores source credibility so institutional (.gov/.edu) domains (30),
+    Tier-1 wire services & peer-reviewed journals (25), and Tier-2 specialist media (18)
+    are prioritized over minor blogs (10), while social/video UGC is rejected (-100).
     """
     if _is_low_quality_domain(url_or_domain):
         return -100
@@ -228,8 +233,10 @@ def _score_source_authority(url_or_domain: str) -> int:
     root_d = _root_publisher_domain(d)
     if d.endswith((".gov", ".edu", ".mil", ".int")) or ".gov." in d or ".edu." in d or d.endswith("europa.eu"):
         return 30
-    if d in TIER1_AUTHORITY_DOMAINS or root_d in TIER1_AUTHORITY_DOMAINS:
-        return 20
+    if d in TIER1_WIRE_AND_SCIENCE_DOMAINS or root_d in TIER1_WIRE_AND_SCIENCE_DOMAINS:
+        return 25
+    if d in TIER2_TECH_MEDIA_DOMAINS or root_d in TIER2_TECH_MEDIA_DOMAINS:
+        return 18
     return 10
 
 
@@ -378,9 +385,9 @@ def _select_balanced_candidate_urls(
     _take_from(ranked_support, quota=2, enforce_unique_publisher=True)
     _take_from(ranked_contra, quota=2, enforce_unique_publisher=True)
 
-    # Backfill if needed from remaining high-credibility results
+    # Backfill if needed from remaining distinct-publisher results
     if len(selected) < 5:
-        _take_from(ranked_support + ranked_contra + ranked_official, quota=5 - len(selected), enforce_unique_publisher=False)
+        _take_from(ranked_support + ranked_contra + ranked_official, quota=5 - len(selected), enforce_unique_publisher=True)
 
     return selected[:5]
 
