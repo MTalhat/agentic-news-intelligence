@@ -133,7 +133,7 @@ class LayaClassifier:
                     for cat_name, cat_prob in sorted_macros[1:]:
                         if len(selected_macros) >= 3:
                             break
-                        if cat_prob >= 0.15 and cat_prob >= 0.30 * top_prob:
+                        if cat_prob >= 0.28 and cat_prob >= 0.65 * top_prob:
                             norm_cat = normalize_macro_tag(cat_name)
                             if norm_cat not in selected_macros:
                                 selected_macros.append(norm_cat)
@@ -145,7 +145,10 @@ class LayaClassifier:
                 selected_macros = ["Tech"]
                 macro_conf = 0.5
 
-        primary_macro = selected_macros[0]
+        from taxonomy import refine_macro_classification
+        primary_macro, selected_macros = refine_macro_classification(
+            title, text or "", selected_macros[0], selected_macros
+        )
 
         # Step 2: Determine Subtags across selected macros & On-Topic relevance
         questions = {

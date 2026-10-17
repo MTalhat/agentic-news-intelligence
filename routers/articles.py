@@ -72,7 +72,10 @@ def get_articles(
         else:
             cur.execute("""
                 SELECT id, source_feed, title, original_url, author, published_at, macro_tag, macro_tags, micro_tags, tldr
-                FROM articles WHERE is_processed = TRUE AND (macro_tag IS NULL OR macro_tag != 'Off-Topic')
+                FROM articles 
+                WHERE is_processed = TRUE 
+                  AND macro_tag IS NOT NULL 
+                  AND macro_tag != 'Off-Topic'
                 ORDER BY published_at DESC LIMIT %s OFFSET %s;
             """, (page_size, offset))
         rows = cur.fetchall()

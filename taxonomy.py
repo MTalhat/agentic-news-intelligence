@@ -172,6 +172,70 @@ def normalize_macro_tag(macro: Optional[str]) -> str:
     return "Tech"
 
 
+# Strict domain-anchor rules for primary macro override and secondary tag validation
+_PRIMARY_DOMAIN_ANCHORS = [
+    ("Gaming", r"\b(?:steam\s*deck|playstation|ps5|xbox|nintendo|switch\s*2|gamedev|pc\s+gamer|esports|unreal\s+engine|fortnite|tomb\s+raider|warhammer|gameplay|video\s+games?|gaming\s+collection|aaa\s+games?)\b"),
+    ("Automotive", r"\b(?:byd|ev\s+charging|electric\s+vehicles?|solid[- ]state\s+batter\w+|full\s+self[- ]driving|robotaxis?|automotive\s+(?:playbook|logistics)|carmakers?|porsche|quantumscape|vehicle\s+control\s+unit|building\s+a\s+car)\b"),
+    ("Science", r"\b(?:nasa|james\s+webb|jwst|exoplanet|prima\s+telescope|space\s+telescope|nuclear\s+fusion|fusion\s+reactor|fast\s+radio\s+burst|biosignatures?|terafab)\b"),
+    ("Finance", r"\b(?:bitcoin|ethereum|solana|crypto\w*|fintech|stocks?\s+to\s+(?:buy|own)|stock\s+access|jpmorgan|binance|liquidations?|bond\s+yields?|ecb|digital\s+euro|investor\s+pulse|software\s+stocks)\b"),
+    ("Hardware", r"\b(?:tsmc|2nm|3nm|gaafet|geforce\s+rtx|rtx\s+spark|radeon|160\s*gb\s+vram|maia\s+300|semiconductors?|wafer|formfactor|teradyne)\b"),
+    ("AI", r"\b(?:llm\s+agents?|ai\s+agents?|frontier\s+ai|frontier[- ]class\s+ai|mistral\s+ai|anthropic|claude|openai|prompt\s+engineering|rlhf|minimax|tesla\s+ai\s+demo|recursive\s+self[- ]improvement)\b"),
+]
+
+_SECONDARY_TAG_GUARDS = {
+    "Gaming": r"\b(?:game\w*|gaming|steam|playstation|ps5|xbox|nintendo|switch|esports|unreal|fortnite|warhammer|dlss|ray\s+tracing|handheld|console)\b",
+    "Automotive": r"\b(?:car|cars|vehicle|ev|evs|battery|batteries|tesla|byd|porsche|quantumscape|automotive|driving|robotaxi|motor)\b",
+    "Finance": r"\b(?:stock|stocks|market|crypto|bitcoin|ethereum|solana|bank|fintech|invest\w*|profit|earnings|yield|dollar|euro|ecb|sec|valuation|funding)\b",
+    "Science": r"\b(?:nasa|space|telescope|webb|jwst|fusion|quantum|physics|biotech|planet|astronomy|scientific|research\s+lab)\b",
+}
+
+
+def refine_macro_classification(
+    title: str,
+    text: str,
+    primary_macro: str,
+    selected_macros: Optional[List[str]] = None
+) -> tuple[str, List[str]]:
+    """
+    Applies deterministic domain-anchor guardrails to prevent cross-category contamination
+    (e.g., preventing Automotive, EV, or Finance articles from receiving a 'Gaming' tag).
+    """
+    import re
+    title_low = (title or "").lower()
+    lead_low = f"{title} {(text or '')[:600]}".lower()
+
+    norm_primary = normalize_macro_tag(primary_macro)
+    macros = [normalize_macro_tag(m) for m in (selected_macros or [norm_primary]) if m]
+
+    # 1. Check title first for unmistakable primary domain anchors
+    matched_anchor = None
+    for domain_cat, pattern in _PRIMARY_DOMAIN_ANCHORS:
+        if re.search(pattern, title_low):
+            matched_anchor = domain_cat
+            break
+
+    if matched_anchor:
+        norm_primary = matched_anchor
+        if matched_anchor not in macros:
+            macros.insert(0, matched_anchor)
+        else:
+            macros.remove(matched_anchor)
+            macros.insert(0, matched_anchor)
+
+    # 2. Prune secondary macro tags that fail domain lexical guardrails
+    cleaned_macros = [norm_primary]
+    for m in macros:
+        if m == norm_primary or m in cleaned_macros:
+            continue
+        guard_pat = _SECONDARY_TAG_GUARDS.get(m)
+        if guard_pat and not re.search(guard_pat, lead_low):
+            continue
+        cleaned_macros.append(m)
+
+    return norm_primary, cleaned_macros[:3]
+
+
+
 TAG_LABEL_OVERRIDES = {
     "tsmc": "TSMC",
     "oled": "OLED",

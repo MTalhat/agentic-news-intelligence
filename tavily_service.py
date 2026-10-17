@@ -131,6 +131,10 @@ def log_tavily_call(
         if len(_telemetry_history) > 1000:
             _telemetry_history.pop(0)
 
+    # Do not pollute production PostgreSQL tavily_calls during unit tests that temporarily set TAVILY_MOCK=True in memory
+    if mock_flag and os.getenv("TAVILY_MOCK", "0").lower() not in ("1", "true"):
+        return
+
     try:
         from db import pool
         with pool.connection(timeout=0.3) as conn:
