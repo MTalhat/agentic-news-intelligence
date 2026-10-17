@@ -10,6 +10,7 @@ Modularized into domain-specific APIRouter packages under `routers/`:
   - routers.comments      : Contextual paragraph annotations & taxonomy dictionary
 """
 
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,7 +35,18 @@ from routers.intelligence import (
 from routers.search import execute_hybrid_search, natural_search
 from routers.users import get_personalized_feed_data
 
-app = FastAPI(title="Intelligence Newsroom API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        from migrate_v1_tables import run_migration
+        run_migration()
+    except Exception:
+        pass
+    yield
+
+
+app = FastAPI(title="Intelligence Newsroom API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
