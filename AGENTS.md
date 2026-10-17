@@ -78,7 +78,15 @@
 
 ```text
 rss-backend/
-├── main.py                  # Primary FastAPI API Gateway, Search Engine & Streaming Handlers
+├── main.py                  # Primary FastAPI API Gateway (~65 lines, CORS & router wiring)
+├── routers/                 # Modular Domain APIRouter Package
+│   ├── __init__.py          # Router exports (articles, search, intelligence, users, comments)
+│   ├── deps.py              # Shared dependencies (INGESTION_SECRET, validate_uuid, parse_vector)
+│   ├── articles.py          # Feed retrieval, article detail & HMAC-protected ingestion
+│   ├── search.py            # 3-Tier Hybrid RRF search engine & Live Web Horizon
+│   ├── intelligence.py      # Copilot SSE, Multi-Source Synthesis SSE, Daily Digest & Tavily Ops
+│   ├── users.py             # User onboarding, preferences, EMA interactions & personalized feed
+│   └── comments.py          # Contextual paragraph annotations & taxonomy dictionary
 ├── worker.py                # Asynchronous RSS Ingestion & AI Enrichment Worker (SKIP LOCKED)
 ├── classifier.py            # Local Decision SLM (convaiinnovations/laya)
 ├── embedder.py              # Dense Vector Embedding Engine (sentence-transformers/all-MiniLM-L6-v2)
@@ -123,8 +131,8 @@ rss-backend/
 
 ### Detailed File Responsibilities
 
-#### `main.py`
-- **Role**: Primary application entry point running Uvicorn / FastAPI.
+#### `main.py` & `routers/`
+- **Role**: Primary application entry point (`main.py`) and modular domain `APIRouter` modules (`routers/articles.py`, `routers/search.py`, `routers/intelligence.py`, `routers/users.py`, `routers/comments.py`, `routers/deps.py`).
 - **Key Responsibilities**:
   - `GET /api/articles`: Paginated feed retrieval with macro tag filtering (`macro=Gaming`, `macro=Tech`, etc.).
   - `GET /api/articles/{article_id}`: Full article detail with clean text, TL;DR, macro/micro tags, and metadata.

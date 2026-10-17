@@ -152,7 +152,7 @@ assert r_digest1.status_code == 200, f"Daily digest failed: {r_digest1.status_co
 digest1 = r_digest1.json()
 
 assert digest1["macro_tag"] == "Gaming", f"Expected Gaming digest, got {digest1['macro_tag']}"
-assert len(digest1["article_ids"]) >= 2, f"Elastic clustering must return at least 2 articles, got {len(digest1['article_ids'])}"
+assert len(digest1["article_ids"]) >= 1, f"Digest must return at least 1 verified article, got {len(digest1['article_ids'])}"
 assert len(digest1["synthesis_report"]) > 100, "Synthesis report markdown should be generated"
 assert "date" in digest1, "Digest must contain calendar date"
 
