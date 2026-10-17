@@ -161,31 +161,69 @@ def _truncate_markdown_safely(text: str, max_chars: int = 25000) -> str:
     return sliced
 
 
-def get_personalized_search_queries(max_queries: int = 2) -> list[tuple[str, str]]:
+def get_personalized_search_queries(max_queries: int = 3) -> list[tuple[str, str]]:
     """
-    Synthesizes dynamic search queries from active user interest tags and preferences.
-    Ensures Tavily autonomous harvesting actively adapts to user behavior in addition to static taxonomy.
+    Synthesizes dynamic multi-angle search queries from active user interest tags AND
+    liked/disliked article interactions (discovery, technical depth, and counterpoint).
+    Ensures Tavily autonomous harvesting actively adapts to user behavior and feedback.
     """
-    queries = []
+    queries: list[tuple[str, str]] = []
     try:
         from db import pool
         with pool.connection(timeout=0.5) as conn:
             with conn.cursor() as cur:
+                # 1. Gather micro-tags from explicitly liked articles (highest signal)
+                cur.execute("""
+                    SELECT unnest(a.micro_tags) AS tag, COUNT(*) AS cnt
+                    FROM user_article_interactions uai
+                    JOIN articles a ON a.id = uai.article_id
+                    WHERE uai.interaction_type = 'like'
+                      AND a.micro_tags IS NOT NULL
+                    GROUP BY tag
+                    ORDER BY cnt DESC
+                    LIMIT 6;
+                """)
+                liked_tags = [r[0] for r in cur.fetchall() if r[0] and r[0] != "off_topic"]
+
+                # 2. Gather micro-tags from disliked/skipped articles to exclude
+                cur.execute("""
+                    SELECT DISTINCT unnest(a.micro_tags) AS tag
+                    FROM user_article_interactions uai
+                    JOIN articles a ON a.id = uai.article_id
+                    WHERE uai.interaction_type IN ('dislike', 'skip')
+                      AND a.micro_tags IS NOT NULL
+                    LIMIT 10;
+                """)
+                disliked_tags = {r[0] for r in cur.fetchall() if r[0]}
+
+                # 3. Gather onboarding preferred_micro_tags
                 cur.execute("""
                     SELECT DISTINCT unnest(preferred_micro_tags) AS tag 
                     FROM users 
                     WHERE preferred_micro_tags IS NOT NULL AND cardinality(preferred_micro_tags) > 0
-                    LIMIT 6;
+                    LIMIT 8;
                 """)
-                rows = cur.fetchall()
-                tags = [r[0].replace("_", " ") for r in rows if r[0]]
-                if tags:
-                    for i in range(0, min(len(tags), max_queries * 2), 2):
-                        chunk = tags[i:i+2]
-                        queries.append((" ".join(chunk) + " breaking innovations news", "news"))
+                pref_tags = [r[0] for r in cur.fetchall() if r[0]]
+
+                merged_raw = list(dict.fromkeys(liked_tags + pref_tags))
+                filtered_tags = [t.replace("_", " ") for t in merged_raw if t not in disliked_tags]
+                if not filtered_tags and merged_raw:
+                    filtered_tags = [t.replace("_", " ") for t in merged_raw[:4]]
+
+                angles = [
+                    "breaking announcements and industry releases",
+                    "technical architecture benchmarks and analysis",
+                    "independent review risks and market challenges"
+                ]
+                if filtered_tags:
+                    for idx, i in enumerate(range(0, min(len(filtered_tags), max_queries * 2), 2)):
+                        chunk = filtered_tags[i:i+2]
+                        angle_suffix = angles[idx % len(angles)]
+                        topic_type = "finance" if any(k in " ".join(chunk) for k in ("crypto", "fintech", "market", "stock", "earnings")) else "news"
+                        queries.append((f"{' '.join(chunk)} {angle_suffix}", topic_type))
     except Exception as e:
         logger.info("[Ingest] Personalized query synthesis note: %s", e)
-    return queries
+    return queries[:max_queries]
 
 
 def harvest_and_ingest(
@@ -226,9 +264,9 @@ def harvest_and_ingest(
         target_total or "N/A"
     )
 
-    # Dynamic Personalization Loop: Synthesize queries from active user preferences
+    # Dynamic Personalization Loop: Synthesize queries from active user preferences & likes
     query_schedule = dict(TAXONOMY_QUERIES)
-    personalized_queries = get_personalized_search_queries(max_queries=2)
+    personalized_queries = get_personalized_search_queries(max_queries=3)
     if personalized_queries:
         logger.info("[Ingest] Injected %d personalized user interest queries into harvest cycle.", len(personalized_queries))
         query_schedule["Personalized"] = personalized_queries
@@ -267,7 +305,10 @@ def harvest_and_ingest(
             category_fetched += len(results)
             total_fetched += len(results)
 
-            payload = []
+            # Pass 1: Clean raw content & collect short-content URLs for a single batched Tavily Extract call (N13)
+            staged_items = []
+            short_urls_to_extract = []
+
             for r in results:
                 raw_url = r.get("url", "").strip()
                 clean_url = canonicalize_url(raw_url)
@@ -282,17 +323,25 @@ def harvest_and_ingest(
                     continue
                 seen_urls.add(clean_url)
 
-                # Clean content through hardened Markdown pipeline
                 text = clean_article_markdown(title, raw_text)
                 if not text or len(text) < 250:
-                    # Tavily Extract Fallback for paywalls or JS-heavy sites
-                    extract_res = tavily_extract(clean_url, purpose="ingest_extract_fallback")
-                    for ep in extract_res.get("results", []):
-                        if ep.get("raw_content"):
-                            text = clean_article_markdown(title, ep["raw_content"])
-                            break
-                    if not text or len(text) < 250:
-                        continue
+                    short_urls_to_extract.append(clean_url)
+                staged_items.append((r, clean_url, title, text))
+
+            extracted_by_url = {}
+            if short_urls_to_extract:
+                extract_res = tavily_extract(short_urls_to_extract[:5], purpose="ingest_extract_fallback")
+                for ep in extract_res.get("results", []):
+                    ep_url = canonicalize_url(ep.get("url", ""))
+                    if ep_url and ep.get("raw_content"):
+                        extracted_by_url[ep_url] = ep["raw_content"]
+
+            payload = []
+            for r, clean_url, title, text in staged_items:
+                if (not text or len(text) < 250) and clean_url in extracted_by_url:
+                    text = clean_article_markdown(title, extracted_by_url[clean_url])
+                if not text or len(text) < 250:
+                    continue
 
                 # Layer 2: Content Hash Deduplication (SHA-256)
                 content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()

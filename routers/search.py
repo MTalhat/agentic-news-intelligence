@@ -207,7 +207,7 @@ def natural_search(
         for item in res:
             local_urls.add(canonicalize_url(item.get("url", "")))
 
-    raw_web = search_news(q, max_results=4, search_topic="news", include_raw_content=False, timeout=5.0)
+    raw_web = search_news(q, max_results=4, search_topic="news", include_raw_content=False, timeout=5.0, purpose="live_horizon")
     live_formatted = [
         {
             "title": w.get("title", "Live Web Result"),

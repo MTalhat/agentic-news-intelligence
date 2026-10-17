@@ -115,6 +115,45 @@ def test_fresh_story_rule():
     assert _is_fresh_cluster(fresh_articles, max_hours=6.0) is True
 
 
+def test_wire_origin_incidental_mention_no_false_positive():
+    from evidence_verifier import detect_wire_origin
+    # Incidental body mention of Reuters or Bloomberg must NOT collapse independent origin into wire agency (N4)
+    incidental_tc = (
+        "Nvidia unveiled its latest rack-scale cooling architecture at GTC today. "
+        "Analysts speaking to Bloomberg and Reuters last month had speculated about liquid cooling yields."
+    )
+    assert detect_wire_origin(incidental_tc, "https://techcrunch.com/2026/10/17/nvidia-cooling/") == "techcrunch.com"
+    # Genuine dateline/byline MUST be detected as wire origin
+    genuine_wire = "TAIPEI (Reuters) - Taiwan Semiconductor Manufacturing Co reported record quarterly profit."
+    assert detect_wire_origin(genuine_wire, "https://yahoo.com/finance/news/tsmc-profit.html") == "Reuters"
+
+
+def test_balanced_candidate_selection_and_anti_circular_guard():
+    from evidence_verifier import _select_balanced_candidate_urls
+    official = [{"url": "https://nvidianews.nvidia.com/news/b200"}, {"url": "https://nvidia.com/extra"}]
+    support = [
+        {"url": "https://reuters.com/tech/b200-1"},
+        {"url": "https://Tomshardware.com/tech/b200-2"},
+        {"url": "https://anandtech.com/tech/b200-3"}
+    ]
+    contra = [
+        {"url": "https://ft.com/content/b200-delay-1"},
+        {"url": "https://wsj.com/articles/b200-delay-2"},
+        {"url": "https://bloomberg.com/news/b200-delay-3"}
+    ]
+    selected = _select_balanced_candidate_urls(
+        official_results=official,
+        support_results=support,
+        contra_results=contra,
+        local_urls=["https://techcrunch.com/local-story"]
+    )
+    # 1 official + 2 support + 2 contradiction = 5 balanced URLs
+    assert len(selected) == 5
+    assert "https://nvidianews.nvidia.com/news/b200" in selected
+    assert "https://ft.com/content/b200-delay-1" in selected
+    assert "https://wsj.com/articles/b200-delay-2" in selected
+
+
 if __name__ == "__main__":
     print("=" * 65)
     print("    RUNNING EVIDENCE VERIFIER & ORIGINS TEST SUITE")
@@ -131,6 +170,11 @@ if __name__ == "__main__":
     print("✓ test_negation_aware_stance_classification PASSED")
     test_fresh_story_rule()
     print("✓ test_fresh_story_rule PASSED")
+    test_wire_origin_incidental_mention_no_false_positive()
+    print("✓ test_wire_origin_incidental_mention_no_false_positive PASSED")
+    test_balanced_candidate_selection_and_anti_circular_guard()
+    print("✓ test_balanced_candidate_selection_and_anti_circular_guard PASSED")
     print("=" * 65)
-    print("[ALL 6 EVIDENCE & ORIGIN TESTS PASSED!]")
+    print("[ALL 8 EVIDENCE & ORIGIN TESTS PASSED!]")
     print("=" * 65)
+

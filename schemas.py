@@ -45,7 +45,7 @@ class UserPreferencesUpdate(BaseModel):
 
 class UserInteractionRequest(BaseModel):
     user_id: str
-    interaction_type: str = Field(default="like", description="'like' or 'bookmark'")
+    interaction_type: str = Field(default="like", description="'like', 'dislike', 'skip', 'bookmark', or 'read'")
 
 class UserProfileOut(BaseModel):
     id: str
@@ -63,6 +63,7 @@ class DailyDigestOut(BaseModel):
     article_ids: List[str]
     articles: List[Dict[str, Any]] = Field(default_factory=list)
     tavily_sources: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_card: Optional[Dict[str, Any]] = None
     synthesis_report: str
     is_cached: bool = False
 

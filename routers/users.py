@@ -32,13 +32,19 @@ def get_personalized_feed_data(user_id: str, page: int = 1, page_size: int = 20)
         if not onboarding_done or not preferred_macros:
             cur.execute("""
                 SELECT id, source_feed, title, original_url, author, published_at, macro_tag, macro_tags, micro_tags, tldr
-                FROM articles
-                WHERE is_processed = TRUE 
-                  AND macro_tag IS NOT NULL 
-                  AND macro_tag != 'Off-Topic'
-                  AND (on_topic_score IS NULL OR on_topic_score >= 0.40)
-                ORDER BY published_at DESC LIMIT %s OFFSET %s;
-            """, (page_size, offset))
+                FROM articles a
+                WHERE a.is_processed = TRUE 
+                  AND a.macro_tag IS NOT NULL 
+                  AND a.macro_tag != 'Off-Topic'
+                  AND (a.on_topic_score IS NULL OR a.on_topic_score >= 0.40)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_article_interactions uai_d
+                      WHERE uai_d.user_id = %s
+                        AND uai_d.article_id = a.id
+                        AND uai_d.interaction_type IN ('dislike', 'skip')
+                  )
+                ORDER BY a.published_at DESC LIMIT %s OFFSET %s;
+            """, (valid_user_id, page_size, offset))
             fallback_rows = cur.fetchall()
             items = [
                 {
@@ -47,7 +53,8 @@ def get_personalized_feed_data(user_id: str, page: int = 1, page_size: int = 20)
                     "macro_tags": r[7] if r[7] else ([r[6]] if r[6] else []),
                     "micro_tags": r[8] or [], "tldr": r[9],
                     "personal_score": 50,
-                    "is_liked": False
+                    "is_liked": False,
+                    "is_disliked": False
                 }
                 for r in fallback_rows
             ]
@@ -63,7 +70,7 @@ def get_personalized_feed_data(user_id: str, page: int = 1, page_size: int = 20)
                 "articles": items
             }
 
-        # Multi-factor zero-leakage personalized ranking
+        # Multi-factor zero-leakage personalized ranking (excluding disliked/skipped articles)
         interest_vec_str = None
         user_vec = parse_vector(user_interest_emb)
         if user_vec is not None:
@@ -99,6 +106,12 @@ def get_personalized_feed_data(user_id: str, page: int = 1, page_size: int = 20)
           AND a.macro_tag != 'Off-Topic'
           AND (a.on_topic_score IS NULL OR a.on_topic_score >= 0.40)
           AND (a.macro_tag = ANY(%(preferred_macros)s) OR a.macro_tags && %(preferred_macros)s::text[])
+          AND NOT EXISTS (
+              SELECT 1 FROM user_article_interactions uai_d
+              WHERE uai_d.user_id = %(user_id)s
+                AND uai_d.article_id = a.id
+                AND uai_d.interaction_type IN ('dislike', 'skip')
+          )
         ORDER BY personal_score DESC, a.published_at DESC
         LIMIT %(limit)s OFFSET %(offset)s;
         """
@@ -120,7 +133,8 @@ def get_personalized_feed_data(user_id: str, page: int = 1, page_size: int = 20)
                 "macro_tags": r[7] if r[7] else ([r[6]] if r[6] else []),
                 "micro_tags": r[8] or [], "tldr": r[9],
                 "personal_score": r[10],
-                "is_liked": bool(r[11])
+                "is_liked": bool(r[11]),
+                "is_disliked": False
             }
             for r in ranked_rows
         ]
@@ -145,12 +159,21 @@ def personalized_feed(user_id: str, page: int = 1, page_size: int = 20):
 
 @router.post("/api/articles/{article_id}/interactions")
 def toggle_interaction(article_id: str, req: UserInteractionRequest):
-    """Toggles like or bookmark state for an article. Applies EMA interest vector learning on 'like'."""
+    """
+    Toggles like, dislike, skip, bookmark, or read state for an article.
+    Feeds user interaction context directly into both the 384d interest_embedding
+    (EMA attraction on 'like', negative EMA repulsion on 'dislike'/'skip') and
+    the user's preferred_micro_tags / preferred_macro_tags profile.
+    """
     valid_art_id = validate_uuid(article_id, "article_id")
     valid_user_id = validate_uuid(req.user_id, "user_id")
     itype = req.interaction_type.strip().lower()
-    if itype not in ("like", "bookmark", "read"):
-        raise HTTPException(status_code=400, detail="Invalid interaction_type. Must be 'like', 'bookmark', or 'read'.")
+    valid_types = ("like", "dislike", "skip", "bookmark", "read")
+    if itype not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid interaction_type. Must be one of: {', '.join(valid_types)}."
+        )
 
     with get_db() as cur:
         cur.execute("""
@@ -171,46 +194,114 @@ def toggle_interaction(article_id: str, req: UserInteractionRequest):
                 "article_id": valid_art_id,
                 "user_id": valid_user_id
             }
-        else:
+
+        # Remove mutually exclusive opposite signals (like vs dislike/skip)
+        if itype == "like":
             cur.execute("""
-                INSERT INTO user_article_interactions (user_id, article_id, interaction_type)
-                VALUES (%s, %s, %s);
-            """, (valid_user_id, valid_art_id, itype))
+                DELETE FROM user_article_interactions
+                WHERE user_id = %s AND article_id = %s AND interaction_type IN ('dislike', 'skip');
+            """, (valid_user_id, valid_art_id))
+        elif itype in ("dislike", "skip"):
+            cur.execute("""
+                DELETE FROM user_article_interactions
+                WHERE user_id = %s AND article_id = %s AND interaction_type = 'like';
+            """, (valid_user_id, valid_art_id))
 
-            # Dynamic EMA Vector Reinforcement on "like"
-            if itype == "like":
-                cur.execute("SELECT embedding FROM articles WHERE id = %s;", (valid_art_id,))
-                art_emb_row = cur.fetchone()
-                art_emb = art_emb_row[0] if art_emb_row else None
+        cur.execute("""
+            INSERT INTO user_article_interactions (user_id, article_id, interaction_type)
+            VALUES (%s, %s, %s);
+        """, (valid_user_id, valid_art_id, itype))
 
-                cur.execute("SELECT interest_embedding FROM users WHERE id = %s;", (valid_user_id,))
-                user_emb_row = cur.fetchone()
-                user_emb = user_emb_row[0] if user_emb_row else None
+        updated_micros = None
+        updated_macros = None
+        new_vec_str = None
 
-                art_vec = parse_vector(art_emb)
-                user_vec = parse_vector(user_emb)
+        # Dynamic EMA Vector & Tag Context Learning on 'like' and 'dislike'/'skip'
+        if itype in ("like", "dislike", "skip"):
+            cur.execute("""
+                SELECT embedding, macro_tag, micro_tags
+                FROM articles WHERE id = %s;
+            """, (valid_art_id,))
+            art_row = cur.fetchone()
+            art_emb = art_row[0] if art_row else None
+            art_macro = art_row[1] if art_row else None
+            art_micros = (art_row[2] or []) if art_row else []
 
-                if art_vec is not None:
+            cur.execute("""
+                SELECT interest_embedding, preferred_macro_tags, preferred_micro_tags
+                FROM users WHERE id = %s;
+            """, (valid_user_id,))
+            user_row = cur.fetchone()
+            user_emb = user_row[0] if user_row else None
+            curr_macros = list(user_row[1] or []) if user_row else []
+            curr_micros = list(user_row[2] or []) if user_row else []
+
+            art_vec = parse_vector(art_emb)
+            user_vec = parse_vector(user_emb)
+
+            new_vec_str = None
+            if art_vec is not None:
+                if itype == "like":
+                    # Positive EMA attraction (+0.15 toward liked article)
                     if user_vec is None:
                         new_vec = art_vec.tolist()
                     else:
                         blended = 0.85 * user_vec + 0.15 * art_vec
                         norm = float(np.linalg.norm(blended))
                         new_vec = (blended / norm if norm > 0 else blended).tolist()
+                    new_vec_str = str(new_vec)
+                else:
+                    # Negative EMA repulsion (-0.12 away from disliked/skipped article)
+                    if user_vec is not None:
+                        repelled = user_vec - 0.12 * art_vec
+                        norm = float(np.linalg.norm(repelled))
+                        new_vec = (repelled / norm if norm > 0 else user_vec).tolist()
+                        new_vec_str = str(new_vec)
 
-                    cur.execute("""
-                        UPDATE users 
-                        SET interest_embedding = %s::vector 
-                        WHERE id = %s;
-                    """, (str(new_vec), valid_user_id))
+            if itype == "like":
+                if art_macro and art_macro != "Off-Topic" and art_macro not in curr_macros:
+                    curr_macros.append(art_macro)
+                for mt in art_micros[:2]:
+                    if mt and mt != "off_topic" and mt not in curr_micros:
+                        curr_micros.insert(0, mt)
+                curr_micros = curr_micros[:15]
+            else:
+                # On dislike/skip, prune disliked article's micro-tags if user has other tags
+                disliked_set = set(art_micros[:2])
+                remaining = [t for t in curr_micros if t not in disliked_set]
+                if remaining:
+                    curr_micros = remaining
 
-            return {
-                "status": "recorded",
-                "active": True,
-                "interaction_type": itype,
-                "article_id": valid_art_id,
-                "user_id": valid_user_id
-            }
+            updated_macros = curr_macros
+            updated_micros = curr_micros
+
+            if new_vec_str is not None:
+                cur.execute("""
+                    UPDATE users 
+                    SET interest_embedding = %s::vector,
+                        preferred_macro_tags = %s,
+                        preferred_micro_tags = %s,
+                        onboarding_completed = TRUE
+                    WHERE id = %s;
+                """, (new_vec_str, updated_macros, updated_micros, valid_user_id))
+            else:
+                cur.execute("""
+                    UPDATE users 
+                    SET preferred_macro_tags = %s,
+                        preferred_micro_tags = %s
+                    WHERE id = %s;
+                """, (updated_macros, updated_micros, valid_user_id))
+
+        return {
+            "status": "recorded",
+            "active": True,
+            "interaction_type": itype,
+            "article_id": valid_art_id,
+            "user_id": valid_user_id,
+            "ema_updated": bool(itype in ("like", "dislike", "skip") and new_vec_str is not None),
+            "updated_preferred_macro_tags": updated_macros,
+            "updated_preferred_micro_tags": updated_micros
+        }
 
 
 @router.post("/api/users/login")

@@ -141,7 +141,28 @@ r_like2 = requests.post(
 assert r_like2.status_code == 200, f"Second like returned {r_like2.status_code}"
 d_like2 = r_like2.json()
 assert d_like2["status"] == "removed" and d_like2["active"] is False, "Second like should toggle to removed and inactive"
-print("  --> PASS: Interaction toggle verified (insert on active, delete on untoggle).")
+
+# 6C: Dislike Repulsion & Immediate Feed Exclusion (E3, N22)
+r_dislike1 = requests.post(
+    f"{BASE_URL}/api/articles/{test_article_id}/interactions",
+    json={"user_id": user_id, "interaction_type": "dislike"}
+)
+assert r_dislike1.status_code == 200, f"Dislike returned {r_dislike1.status_code}"
+d_dislike1 = r_dislike1.json()
+assert d_dislike1["status"] == "recorded" and d_dislike1["active"] is True
+assert d_dislike1["ema_updated"] is True, "Dislike must trigger negative EMA repulsion on user vector"
+
+r_feed_after_dislike = requests.get(f"{BASE_URL}/api/feed/personalized", params={"user_id": user_id, "page_size": 20})
+assert r_feed_after_dislike.status_code == 200
+after_ids = [a["id"] for a in r_feed_after_dislike.json().get("articles", [])]
+assert test_article_id not in after_ids, "Disliked article must be immediately excluded from personalized feed"
+
+# Untoggle dislike to leave clean state
+requests.post(
+    f"{BASE_URL}/api/articles/{test_article_id}/interactions",
+    json={"user_id": user_id, "interaction_type": "dislike"}
+)
+print("  --> PASS: Like/Dislike toggle, EMA vector learning, and immediate disliked-article exclusion verified.")
 
 # -------------------------------------------------------------------
 # Test 7: Daily Rotating Intelligence Digest (GET /api/intelligence/daily-digest)
@@ -153,18 +174,22 @@ digest1 = r_digest1.json()
 
 assert digest1["macro_tag"] == "Gaming", f"Expected Gaming digest, got {digest1['macro_tag']}"
 assert len(digest1["article_ids"]) >= 1, f"Digest must return at least 1 verified article, got {len(digest1['article_ids'])}"
-assert len(digest1["synthesis_report"]) > 100, "Synthesis report markdown should be generated"
+assert len(digest1["synthesis_report"]) > 120, "Synthesis report markdown should be a full multi-section brief"
+assert "Shared Consensus" in digest1["synthesis_report"], "Digest report must include Section 1 (Shared Consensus)"
+assert "evidence_card" in digest1 and digest1["evidence_card"] is not None, "Digest must attach structured evidence_card"
 assert "date" in digest1, "Digest must contain calendar date"
 
-# Test Cache hit on second call (sub-15ms)
+# Test Cache hit on second call (sub-50ms)
 t0 = time.perf_counter()
 r_digest2 = requests.get(f"{BASE_URL}/api/intelligence/daily-digest", params={"user_id": user_id})
 lat_ms = (time.perf_counter() - t0) * 1000
 assert r_digest2.status_code == 200
 digest2 = r_digest2.json()
 assert digest2["is_cached"] is True, "Second call must hit PostgreSQL cache"
-print(f"  --> PASS: Daily digest generated and cached successfully (Cache latency: {lat_ms:.1f}ms).")
+assert "Shared Consensus" in digest2["synthesis_report"], "Cached digest must also preserve full 4-section report"
+print(f"  --> PASS: Daily digest generated with structured 4-section brief + evidence_card and cached (Cache latency: {lat_ms:.1f}ms).")
 
 print("\n" + "=" * 70)
 print("           ALL USER PERSONALIZATION & DIGEST TESTS PASSED!")
 print("=" * 70)
+

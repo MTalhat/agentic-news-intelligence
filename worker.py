@@ -185,6 +185,71 @@ def save_article_enrichment(art_id: str, macro: str, macro_tags: list, micro: li
                 WHERE id = %s;
             """, (macro, micro, tldr, embedding, art_id))
 
+    # Incremental Semantic Story Clustering (C2: auto-populate story_clusters on enrichment)
+    if embedding and macro and macro != "Off-Topic":
+        try:
+            import uuid
+            from evidence_verifier import assign_origins
+            with get_db() as cur:
+                cur.execute("""
+                    SELECT id, title, tldr, clean_text, original_url, published_at
+                    FROM articles
+                    WHERE is_processed = TRUE
+                      AND id != %s
+                      AND macro_tag = %s
+                      AND embedding IS NOT NULL
+                      AND (embedding <=> %s::vector) < 0.45
+                      AND published_at >= NOW() - INTERVAL '7 days'
+                    ORDER BY (embedding <=> %s::vector) ASC
+                    LIMIT 2;
+                """, (art_id, macro, embedding, embedding))
+                siblings = cur.fetchall()
+                cur.execute("""
+                    SELECT id, title, tldr, clean_text, original_url, published_at
+                    FROM articles WHERE id = %s;
+                """, (art_id,))
+                self_row = cur.fetchone()
+                if self_row:
+                    all_rows = [self_row] + list(siblings)
+                    cluster_ids = [str(r[0]) for r in all_rows]
+                    origin_docs = [
+                        {
+                            "id": str(r[0]), "title": r[1], "tldr": r[2] or "",
+                            "text": r[3] or "", "url": r[4], "published_at": r[5]
+                        }
+                        for r in all_rows
+                    ]
+                    sorted_key = ",".join(sorted(x.strip().lower() for x in cluster_ids))
+                    det_cid = str(uuid.uuid5(uuid.NAMESPACE_OID, sorted_key))
+                    origin_info = assign_origins(origin_docs)
+                    c_title = (
+                        f"{macro} Intelligence Consensus: {self_row[1][:65]}"
+                        if len(all_rows) >= 2
+                        else f"{macro} Story Brief: {self_row[1][:65]}"
+                    )
+                    cur.execute("""
+                        INSERT INTO story_clusters
+                            (id, macro_tag, cluster_title, centroid_embedding, article_ids, independent_origins_count, origin_breakdown, updated_at)
+                        VALUES (%s, %s, %s, %s::vector, %s::uuid[], %s, %s::jsonb, NOW())
+                        ON CONFLICT (id) DO UPDATE
+                        SET cluster_title = EXCLUDED.cluster_title,
+                            article_ids = EXCLUDED.article_ids,
+                            independent_origins_count = EXCLUDED.independent_origins_count,
+                            origin_breakdown = EXCLUDED.origin_breakdown,
+                            updated_at = NOW();
+                    """, (
+                        det_cid,
+                        macro,
+                        c_title,
+                        embedding,
+                        cluster_ids,
+                        origin_info.get("independent_origins_count", 1),
+                        json.dumps(origin_info.get("origins", []))
+                    ))
+        except Exception as ce:
+            logger.debug("[Worker Cluster] Incremental story_clusters update skipped: %s", ce)
+
+
 
 def process_batch() -> bool:
     with get_db() as cur:

@@ -86,6 +86,9 @@ def test_mock_research():
     try:
         resp = tavily_research("Semiconductor 2nm lithography scaling")
         assert "Executive Intelligence Brief" in resp.get("report", "")
+        poll_resp = tavily_service.get_research_result("demo-req-123")
+        assert poll_resp.get("status") == "completed"
+        assert "Executive Intelligence Brief" in poll_resp.get("report", "")
     finally:
         tavily_service.TAVILY_MOCK = orig
 
@@ -108,6 +111,9 @@ def test_telemetry_stats():
     stats = get_tavily_telemetry_stats()
     assert "total_calls" in stats
     assert "total_credits_estimated" in stats
+    assert "real_calls_count" in stats
+    assert "mock_calls_count" in stats
+    assert "real_credits_used" in stats
     assert "by_endpoint" in stats
     assert stats["total_calls"] > 0
 
